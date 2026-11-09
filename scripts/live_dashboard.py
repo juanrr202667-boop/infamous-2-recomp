@@ -179,9 +179,9 @@ class Dashboard:
                     "result": result if result in ("passed", "failed", "running") else "unknown",
                     "summary": clean_text(explicit.get("summary"), 500),
                     "updated_at": clean_text(explicit.get("updated_at"), 50), "source": "live-status.json"}
-        directory = self.coordination / "codex"
+        directory = self.coordination / "logs"
         try:
-            candidates = [path for path in directory.glob("CX-*.log")
+            candidates = [path for path in directory.glob("*.log")
                           if re.search(r"(?:pytest|ctest|gate|ninja|build)[\w-]*\.log$", path.name)
                           and self.allowed(path, directory)]
             candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)

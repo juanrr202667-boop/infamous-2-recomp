@@ -34,7 +34,7 @@ class DashboardTests(unittest.TestCase):
         self.frame = self.run / "rsx/frame_07"
         self.frame.mkdir(parents=True)
         self.coordination = self.root / "build/coordination"
-        (self.coordination / "codex").mkdir(parents=True)
+        (self.coordination / "logs").mkdir(parents=True)
 
     def write_status(self, **changes):
         status = {"running": False, "duration_seconds": 600.156, "time_limit_seconds": 600,
@@ -106,7 +106,7 @@ class DashboardTests(unittest.TestCase):
         (self.coordination / "live-status.json").write_text(json.dumps({
             "stage": "Integrating temporal views", "detail": "Preparing validation", "candidate": 49,
             "updated_at": "2026-10-15T21:30:00Z", "private_path": "C:/secret/file"}), encoding="utf-8")
-        log = self.coordination / "codex/CX-024-final-pytest.log"
+        log = self.coordination / "logs/final-pytest.log"
         log.write_text("........\n62 passed in 7.02s\n", encoding="utf-8")
         self.start()
         with self.get("/api/status") as response:
@@ -167,7 +167,7 @@ class DashboardTests(unittest.TestCase):
         self.bmp()
         (self.frame / "asset.bin").write_bytes(b"secret")
         self.start()
-        for path in ("/../AGENTS.md", "/%2e%2e/AGENTS.md", "/api/image/../../EBOOT.ELF",
+        for path in ("/../CONTRIBUTING.md", "/%2e%2e/CONTRIBUTING.md", "/api/image/../../EBOOT.ELF",
                      "/api/image/%252e%252e/file.bmp", "/build/game/vfs/asset.bin", "/mix.f32",
                      f"/api/image/{RUN}/frame_07/asset.bin",
                      f"/api/image/{RUN}/frame_07/%2e%2e%5cstatus.json"):

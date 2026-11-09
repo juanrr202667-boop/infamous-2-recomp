@@ -36,6 +36,14 @@ writing. See [getting started](docs/getting-started.md) and [CI](docs/ci.md).
 
 RPCS3 may be consulted as a static reference for code, NIDs, or formats. Do not run it as this project's test suite, backend, or runtime.
 
+## Before publishing changes
+
+Keep [public status](docs/public-status.md) current and date older evidence. Do not call the port playable without a native run demonstrating responsive input, controllable movement, camera control, and progression. Raster captures require native-run provenance, limitations, and rights attribution.
+
+Run `./scripts/test.ps1 -Regression -IncludeGpu` when checking the GPU-inclusive baseline. Inspect passed, failed, and skipped totals; excluded tests do not count as passes. Compiler-backed Python fixtures need `I2_CLANG_CL` and writable `TMP`/`TEMP` directories.
+
+Stage only intended files. Run `python scripts/check_publication_manifest.py --update`, stage `PUBLICATION_MANIFEST.json`, then run the verifier without `--update`. Check patch manifest and order, scan for forbidden files, validate documentation links, and review the full diff and third-party notices before pushing.
+
 ## Reporting issues
 
 Provide commit revision, operating system, GPU and driver version when relevant, exact command lines, effective environment variables, and the first observed error. Strip personal information and secrets. Do not attach proprietary game assets; provide minimal synthetic repros and technical summaries.

@@ -19,7 +19,7 @@ Local development history records use of the following tools. They are not redis
 
 - [Python](https://www.python.org/), [LLVM/Clang](https://llvm.org/), [CMake/CTest](https://cmake.org/), and [Ninja](https://ninja-build.org/): automation, code translation, compilation, and testing.
 - [pytest](https://docs.pytest.org/), [NumPy](https://numpy.org/), and [Pillow](https://python-pillow.org/): automated tests and local image/audio analysis.
-- [Graphify](https://github.com/Graphify-Labs/graphify): local AST navigation for handwritten port code, used alongside the caveman communication skill. Graph extraction does not validate runtime behavior; no game assets are uploaded.
+- [Graphify](https://github.com/Graphify-Labs/graphify): local AST navigation for handwritten port code. Graph extraction does not validate runtime behavior; no game assets are uploaded.
 - [RTK](https://github.com/rtk-ai/rtk): local command-output filtering, OSS edition 1.0.1 (Apache-2.0). Complete diagnostic artifacts remain available locally.
 - [FFmpeg](https://ffmpeg.org/): reference decoder for local audio and video comparisons. This tool usage is distinct from the decoder embedded in the SDK.
 - [RenderDoc](https://renderdoc.org/) and [DCC-MCP RenderDoc](https://github.com/dcc-mcp/dcc-mcp-renderdoc): local capture and inspection of D3D12 commands and resources. Real capture and replay are recorded in local diagnostics; this does not validate the accuracy of all rendering passes.
