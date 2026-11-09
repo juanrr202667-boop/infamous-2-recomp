@@ -43,6 +43,32 @@ target_compile_options(frame_clock_probe PRIVATE ${I2_PROBE_COMPILE_OPTIONS})
 target_link_options(frame_clock_probe PRIVATE ${I2_PROBE_LINK_OPTIONS})
 target_link_libraries(frame_clock_probe PRIVATE winmm)
 enable_testing()
+
+# The Python frequency checks launch this synthetic probe. Build it with the
+# other fixtures so a clean checkout can run the complete public test suite.
+if(PORT_TESTS_USE_SYNTHETIC)
+    add_executable(microstep_probe smc_frequency/microstep_probe.cpp
+        "${SDK}/runtime/spu/spu_channels.c"
+        "${SDK}/runtime/ppu/ppu_loader.cpp"
+        "${SDK}/runtime/ppu/ppu_hle.cpp"
+        "${SDK}/runtime/ppu/ppu_fs.cpp"
+        "${SDK}/runtime/ppu/ppu_sysprx.cpp")
+    target_compile_features(microstep_probe PRIVATE cxx_std_20)
+    target_compile_definitions(microstep_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
+    if(MSVC)
+        target_compile_options(microstep_probe PRIVATE /EHsc)
+    endif()
+    target_include_directories(microstep_probe PRIVATE
+        "${TEST_RECOMP_INCLUDE}" "${SDK}/include"
+        "${SDK}/runtime/platform" "${SDK}/runtime/spu"
+        "${SDK}/runtime/ppu" "${SDK}/runtime/memory"
+        "${SDK}/libs/spurs")
+    target_link_libraries(microstep_probe PRIVATE
+        ps3recomp_runtime dbghelp bcrypt)
+    set_target_properties(microstep_probe PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${PORT_ROOT}/build/smc-frequency-fixture")
+endif()
+
 add_executable(wws_target_scan_probe wws_target_scan_probe.cpp)
 target_compile_features(wws_target_scan_probe PRIVATE cxx_std_17)
 target_compile_definitions(wws_target_scan_probe PRIVATE _CRT_SECURE_NO_WARNINGS)

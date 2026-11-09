@@ -24,6 +24,9 @@ including six WARP cases, and 515 passing Python tests. Eighteen Python cases
 were skipped: eleven optional GPU cases, two superseded checks, one game-local
 ELF check, one symlink permission check, and three native game boot checks.
 The skip list is recorded in the JUnit report; none is counted as a pass.
+On a later local rerun, the symlink permission check passed, producing 516
+passes and 17 skips. This environmental difference is accepted by the gate;
+the three game boot checks remain skipped.
 
 ## Baseline policy
 
