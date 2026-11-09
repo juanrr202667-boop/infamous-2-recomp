@@ -1,5 +1,5 @@
 {
-  "approved_at": "2026-11-09T22:08:05.681454+00:00",
+  "approved_at": "2026-11-09T22:23:26.897640+00:00",
   "ctest": {
     "audio_amplitude_disabled": "passed",
     "audio_amplitude_eight-disabled": "passed",
@@ -208,7 +208,7 @@
   },
   "environment": "Windows 11, Python 3.13.13",
   "patch_count": 91,
-  "patch_hash": "ae50f7636a9dce7142cef323006eaa0b9930aeb9ecbff5b81f2fe087e918a38b",
+  "patch_hash": "b85da90828924de4b43f535da317942afe72933f605fb5439d16bec2732c2629",
   "pytest": {
     "tests.native.smc_frequency.test_frequency::test_counts_each_observed_fallback_when_enabled": "passed",
     "tests.native.smc_frequency.test_frequency::test_default_off_keeps_output_free_of_frequency_data": "passed",

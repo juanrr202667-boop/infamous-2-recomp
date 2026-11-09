@@ -691,11 +691,11 @@
     {
       "order": 34,
       "name": "audio-amplitude-stats.patch",
-      "sha256": "efc56f5f3e9eb97bb5639fd66add64206ab7063991a3276372800e283425db3b",
+      "sha256": "c392e5d7f3eb8f3e5ff7cb45cf4a52c17901be08eeb6f94c4b2e7ae5bc5538e5",
       "series_file": "scripts/patches/audio-amplitude-stats.patch",
       "subsystem": "audio",
       "files": [
-        "libs/audio/cellAudio.c\r"
+        "libs/audio/cellAudio.c"
       ],
       "lines_added": 105,
       "lines_removed": 9,
@@ -1727,11 +1727,11 @@
     {
       "order": 84,
       "name": "d3d12-fragment-capture-state.patch",
-      "sha256": "586d302b307a573681f0acf10c1fd93c9dcb29cffa1326765f6fb90fec1db095",
+      "sha256": "421a2af57d75b0172eac5dc199a4396bd9eb967b011d542885b78f06b2211490",
       "series_file": "scripts/patches/d3d12-fragment-capture-state.patch",
       "subsystem": "RSX/D3D12",
       "files": [
-        "libs/video/rsx_d3d12_backend.c\r"
+        "libs/video/rsx_d3d12_backend.c"
       ],
       "lines_added": 82,
       "lines_removed": 0,
@@ -1748,11 +1748,11 @@
     {
       "order": 85,
       "name": "d3d12-fragment-program-snapshots.patch",
-      "sha256": "afdcd2d978109a3c35b37ae9089db65a6835b555969a919bc4a7eadb226c8f5b",
+      "sha256": "4d7c51ea3ab12325a262232cac49b0878e45a8cf0ef61588320278ce6e7e3127",
       "series_file": "scripts/patches/d3d12-fragment-program-snapshots.patch",
       "subsystem": "RSX/D3D12",
       "files": [
-        "libs/video/rsx_d3d12_backend.c\r"
+        "libs/video/rsx_d3d12_backend.c"
       ],
       "lines_added": 68,
       "lines_removed": 32,
@@ -1770,11 +1770,11 @@
     {
       "order": 86,
       "name": "d3d12-present-selection-capture.patch",
-      "sha256": "45e28d118eec71c93e142960a42e9c9592f84e275b4037c68089a533273c22ab",
+      "sha256": "147133854c3624de07891f5a6e58c16907179af01a6e5ad81eb8b326fcf81285",
       "series_file": "scripts/patches/d3d12-present-selection-capture.patch",
       "subsystem": "RSX/D3D12",
       "files": [
-        "libs/video/rsx_d3d12_backend.c\r"
+        "libs/video/rsx_d3d12_backend.c"
       ],
       "lines_added": 38,
       "lines_removed": 3,

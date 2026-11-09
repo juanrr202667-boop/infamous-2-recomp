@@ -2,6 +2,8 @@
 
 This is an experimental native Windows port of *inFAMOUS 2* (BCUS98125). It uses PS3Recomp pinned to `5244db92669b54831c6d3ebb7a96d58c4dbfa6df` plus an ordered local patch series. **The game is not playable.** Read [public status](public-status.md) before interpreting any run or capture.
 
+The original maintainer is no longer actively developing the port. This repository is a handoff for contributors who want to continue from the documented state. The steps below are intended to make the next investigation concrete without implying that the game already runs correctly.
+
 ## What the repository contains
 
 | Path | Role |

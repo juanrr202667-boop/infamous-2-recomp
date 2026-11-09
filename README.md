@@ -4,6 +4,8 @@ Experimental Windows port of the PlayStation 3 BCUS98125 release, built with a p
 
 **Status (November 2026): not playable.** Local native runs have reached the campaign dock sequence and produced partial 3D backbuffer images. Controllable character movement, correct rendering, reliable audio, and acceptable performance have not been established. See [observed status](docs/public-status.md) for the evidence and its limits.
 
+The original maintainer has stepped away from active development and published this snapshot so others can continue the work. The technical handoff records the current state, reproducible checks, open questions, and next investigation. There is no planned release date or promise of ongoing maintainer support.
+
 This is an independent research project. It is not affiliated with or endorsed by Sony Interactive Entertainment or Sucker Punch Productions.
 
 ## Continue the work
