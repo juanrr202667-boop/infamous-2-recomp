@@ -1,5 +1,5 @@
 # Test-only Python dependencies. The native build does not depend on these.
 pytest>=8,<9
-pytest-asyncio>=0.23,<1
+pytest-asyncio>=1.4.1.post1,<2
 # numpy 2.5 requires Python >=3.12; this project's test matrix uses 3.11.
 numpy>=1.26,<2.5
