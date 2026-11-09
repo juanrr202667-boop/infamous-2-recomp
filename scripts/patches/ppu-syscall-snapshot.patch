@@ -1,0 +1,87 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index e73a151..032e7c6 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -24,6 +24,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <atomic>
+ #ifdef _WIN32
+ #  include <windows.h>
+ #else
+@@ -2952,6 +2953,54 @@ extern "C" void ppu_prof_stamp(void* ctx, unsigned lr);
+ #define PS3_SC_INFLIGHT_MAX 64
+ extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
+ 
++/* Optional bounded observer. Each slot is one atomic value: high word is
++ * syscall+1 (zero means idle), low word is its guest LR. The observer never
++ * reads a guest context or guest memory, and can see calls already in flight
++ * when its delay expires. The delay is relative to the first lv2_syscall. */
++struct ScSnapshot {
++    std::atomic<uint64_t> slots[PS3_SC_INFLIGHT_MAX]{};
++    std::atomic<bool> seen[PS3_SC_INFLIGHT_MAX]{};
++    unsigned delay_ms, interval_ms;
++    static DWORD WINAPI observe(LPVOID arg) {
++        ScSnapshot* s = static_cast<ScSnapshot*>(arg);
++        Sleep(s->delay_ms);
++        for (unsigned n = 0; n < 1200; ++n) {
++            for (unsigned t = 0; t < PS3_SC_INFLIGHT_MAX; ++t) {
++                if (!s->seen[t].load(std::memory_order_acquire)) continue;
++                const uint64_t v = s->slots[t].load(std::memory_order_acquire);
++                if (v) fprintf(stderr, "[sc-snapshot] tid=%u syscall=%u lr=%08X\n",
++                               t, (unsigned)(v >> 32) - 1, (unsigned)v);
++                else fprintf(stderr, "[sc-snapshot] tid=%u idle\n", t);
++            }
++            fflush(stderr);
++            Sleep(s->interval_ms);
++        }
++        return 0;
++    }
++};
++static ScSnapshot* sc_snapshot() {
++    static ScSnapshot* s = []() -> ScSnapshot* {
++        const char* e = getenv("PS3_SC_SNAPSHOT_AFTER_MS");
++        if (!e || !*e) return nullptr;
++        char* end = nullptr;
++        unsigned long delay = strtoul(e, &end, 10);
++        if (*end || delay == 0 || delay > 3600000) return nullptr;
++        unsigned long interval = 1000;
++        const char* i = getenv("PS3_SC_SNAPSHOT_INTERVAL_MS");
++        if (i && *i) {
++            interval = strtoul(i, &end, 10);
++            if (*end || interval < 10 || interval > 60000) return nullptr;
++        }
++        ScSnapshot* p = new ScSnapshot{};
++        p->delay_ms = (unsigned)delay; p->interval_ms = (unsigned)interval;
++        HANDLE thread = CreateThread(nullptr, 0, ScSnapshot::observe, p, 0, nullptr);
++        if (!thread) { delete p; return nullptr; }
++        CloseHandle(thread);
++        return p; /* process lifetime: observer may outlive the guest thread */
++    }();
++    return s;
++}
++
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
+     /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
+@@ -2963,6 +3012,19 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+           const char* e = getenv("PPU_GUARD_EA");
+           if (e && *e) ppu_guard_page((uint32_t)strtoul(e, 0, 16)); } }
+     uint64_t num = ctx->gpr[11];
++    struct SnapshotGuard {
++        ScSnapshot* s; unsigned tid; uint64_t previous;
++        ~SnapshotGuard() { if (s) s->slots[tid].store(previous, std::memory_order_release); }
++    } snapshot{nullptr, 0, 0};
++    if (ScSnapshot* s = sc_snapshot()) {
++        const uint64_t tid = ctx->thread_id;
++        if (tid < PS3_SC_INFLIGHT_MAX && num < UINT32_MAX) {
++            snapshot.s = s; snapshot.tid = (unsigned)tid;
++            const uint64_t value = ((num + 1) << 32) | (uint32_t)ctx->lr;
++            snapshot.previous = s->slots[tid].exchange(value, std::memory_order_acq_rel);
++            s->seen[tid].store(true, std::memory_order_release);
++        }
++    }
+     /* Milestone: which lv2 calls this title makes, in first-occurrence order.
+      * Formatting the key each time is noise next to the profiler stamp below,
+      * which resolves a host return address to a guest function. */

@@ -1,0 +1,61 @@
+diff --git "a/runtime/ppu/ppu_loader.cpp" "b/runtime/ppu/ppu_loader.cpp"
+index aa1b8f7..fce01fb 100644
+--- "a/runtime/ppu/ppu_loader.cpp"
++++ "b/runtime/ppu/ppu_loader.cpp"
+@@ -25,6 +25,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <atomic>
++#include <mutex>
+ #ifdef _WIN32
+ #  include <windows.h>
+ #else
+@@ -3004,6 +3005,40 @@ static ScSnapshot* sc_snapshot() {
+     return s;
+ }
+ 
++/* BCUS98125 wait sites: capture registers from the executing guest thread.
++ * No guest pointer is read. Delay is relative to the first lv2 syscall. */
++static void i2_wws_wait_snapshot(ppu_context* ctx, uint64_t num) {
++    struct State {
++        std::mutex mutex; uint64_t start = 0, last = 0;
++        unsigned delay = 0, interval = 1000, maximum = 60, count = 0;
++    };
++    static State* s = []() -> State* {
++        const char* e = getenv("I2_WWS_WAIT_AFTER_MS");
++        if (!e || !*e) return nullptr;
++        char* end = nullptr; unsigned long delay = strtoul(e, &end, 10);
++        if (*end || !delay || delay > 3600000) return nullptr;
++        unsigned long interval = 1000, maximum = 60;
++        const char* v = getenv("I2_WWS_WAIT_INTERVAL_MS");
++        if (v && *v) { interval = strtoul(v, &end, 10); if (*end || !interval || interval > 60000) return nullptr; }
++        v = getenv("I2_WWS_WAIT_MAX");
++        if (v && *v) { maximum = strtoul(v, &end, 10); if (*end || !maximum || maximum > 10000) return nullptr; }
++        State* p = new State; p->delay = (unsigned)delay; p->interval = (unsigned)interval;
++        p->maximum = (unsigned)maximum; p->start = GetTickCount64(); return p;
++    }();
++    if (!s || num != 141) return;
++    const uint32_t lr = (uint32_t)ctx->lr;
++    if (lr != 0x0037108C && lr != 0x003710B8 && lr != 0x003710E4) return;
++    std::lock_guard<std::mutex> lock(s->mutex);
++    const uint64_t now = GetTickCount64();
++    if (now - s->start < s->delay || s->count >= s->maximum ||
++        (s->count && now - s->last < s->interval)) return;
++    s->last = now; ++s->count;
++    fprintf(stderr, "[i2-wws-wait] tid=%llu lr=%08X r28=%016llX r27=%016llX r29=%016llX\n",
++            (unsigned long long)ctx->thread_id, lr, (unsigned long long)ctx->gpr[28],
++            (unsigned long long)ctx->gpr[27], (unsigned long long)ctx->gpr[29]);
++    fflush(stderr);
++}
++
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
+     /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without
+@@ -3015,6 +3050,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+           const char* e = getenv("PPU_GUARD_EA");
+           if (e && *e) ppu_guard_page((uint32_t)strtoul(e, 0, 16)); } }
+     uint64_t num = ctx->gpr[11];
++    i2_wws_wait_snapshot(ctx, num);
+     struct SnapshotGuard {
+         ScSnapshot* s; unsigned tid; uint64_t previous;
+         ~SnapshotGuard() { if (s) s->slots[tid].store(previous, std::memory_order_release); }

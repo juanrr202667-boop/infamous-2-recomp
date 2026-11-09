@@ -1,0 +1,4 @@
+* text=auto eol=lf
+# Git applies SDK patch context byte for byte. Keep patch files portable.
+# A blank context line in a patch contains one required space.
+*.patch text eol=lf -whitespace

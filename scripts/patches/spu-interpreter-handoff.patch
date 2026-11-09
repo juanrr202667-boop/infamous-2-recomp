@@ -1,0 +1,25 @@
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 0b235d0..4718534 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2035,7 +2035,19 @@ static int spu_smc_microstep(spu_context* ctx)
+         /* Stop at the drain's return point too: it sits mid-function, so it is
+          * no lifted entry, and a job's return would otherwise run on through
+          * the caller's code (GH3's song-freeze; see drain_ret_pc). */
+-        return spu_interp_run_until(ctx, pc, ctx->drain_ret_pc) ? 1 : 0;
++        uint32_t next = spu_interp_run_until(ctx, pc, ctx->drain_ret_pc);
++        if (ctx->status & (SPU_STATUS_STOPPED_BY_STOP | SPU_STATUS_STOPPED_BY_HALT))
++            return 1;
++        if (ctx->drain_ret_pc && ctx->pc == ctx->drain_ret_pc)
++            return 1;          /* matched host caller continues after its drain */
++        if (spu_lifted_lookup(ctx, ctx->pc)) {
++            /* The interpreter returns at a lifted entry without scheduling it.
++             * Publish the transfer so SPU_DRAIN does not mistake rejoin for
++             * normal completion of the whole policy-module quantum. */
++            g_spu_trampoline_fn = spu_indirect_branch;
++            return 1;
++        }
++        return next ? 1 : 0;
+     }
+     { static int _n = 0; if (_n++ < 4)
+         fprintf(stderr, "[spu-smc] microstep img=%d runaway (4096 steps from 0x%05X)\n",

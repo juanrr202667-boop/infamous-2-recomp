@@ -1,0 +1,190 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -2094,7 +2094,7 @@
+                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
+                                           u32 cube_mask, u32 depth_key)
+ {
+-    if (nrt < 1) nrt = 1; if (nrt > 4) nrt = 4;
++    if (nrt < 0 || nrt > 4) return NULL;
+     if (rtfmt == 0) rtfmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+     extern uint8_t* vm_base;
+     extern u32 cellGcmResolveOffset(u32);
+@@ -3523,12 +3523,14 @@
+     if (draw < s_d3d.draw_count && draw < MAX_DRAWS) {
+         const D3D12DrawRecord* dr = &s_d3d.draws[draw];
+         fprintf(stderr, "[TEMPORAL_FATAL] rt=0x%08X mrt=0x%X/0x%X/0x%X size=%ux%u fmt=0x%X "
+-            "dma_seen=0x%X dma=0x%X/0x%X/0x%X/0x%X clear=0x%X fp=0x%X mask=0x%X\n",
++            "dma_seen=0x%X dma=0x%X/0x%X/0x%X/0x%X clear=0x%X fp=0x%X mask=0x%X "
++            "surface_valid=%u target=0x%X cmask=0x%X depth_key=0x%X\n",
+             dr->rt_off, dr->rt_mrt[0], dr->rt_mrt[1], dr->rt_mrt[2], dr->rt_w, dr->rt_h,
+             dr->rt_fmt, dr->surface_meta.dma_seen, dr->surface_meta.color_dma[0],
+             dr->surface_meta.color_dma[1], dr->surface_meta.color_dma[2],
+             dr->surface_meta.color_dma[3], dr->surface_meta.clear_flags,
+-            dr->fp_addr, s_rt_plan[draw].texture_mask);
++            dr->fp_addr, s_rt_plan[draw].texture_mask, dr->surface_meta.valid,
++            dr->surface_meta.color_target, dr->cmask, dr->depth_key);
+         if (unit >= 0 && unit < 16)
+             fprintf(stderr, "[TEMPORAL_FATAL] tex[%d] raw=0x%X size=%ux%u format=0x%X ctrl3=0x%X\n",
+                 unit, dr->tex[unit].raw, dr->tex[unit].w, dr->tex[unit].h,
+@@ -4737,7 +4739,7 @@
+             s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
+             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
+-            int cur_rt = -1;                       /* target A: -1 = backbuffer */
++            int cur_rt = -1;          /* target A: -1 display, -2 no colour */
+             float vp_last_w = 0, vp_last_h = 0;    /* for DRAWARGS */
+             float dvp_x = 0, dvp_y = 0, dvp_w = 0, dvp_h = 0;  /* per-draw, for DRAWARGS */
+             int cur_m[3] = {-1, -1, -1};           /* MRT B/C/D: -1 = unbound   */
+@@ -4752,7 +4754,7 @@
+                 /* The reduced-viewport passes (this title's reflection, drawn
+                  * into a region of the same target) finish here -- snapshot
+                  * before the full-screen scene overwrites them. */
+-                if (!dr->is_clear) {
++                if (!dr->is_clear && dr_num_rts(dr) != 0) {
+                     if (dr->vp_w && dr->vp_w < s_d3d.width) {
+                         seen_small_vp = 1;
+                         subvp_note(dr->vp_x, dr->vp_y, dr->vp_w, dr->vp_h);
+@@ -4768,20 +4770,28 @@
+                 }
+                 /* Render-to-texture: retarget when this op's surfaces differ.
+                  * Depth is a single shared buffer, so clear it per switch. */
+-                int want = s_rt_plan[d].display_target ? -1 : s_rt_plan[d].target[0];
+-                if (want < 0 && dr->rt_off) temporal_abort(d, -1, "missing destination plan");
++                int no_color = dr_num_rts(dr) == 0;
++                int want = no_color ? -2 :
++                    (s_rt_plan[d].display_target ? -1 : s_rt_plan[d].target[0]);
++                if (!no_color && want < 0 && dr->rt_off)
++                    temporal_abort(d, -1, "missing destination plan");
+                 if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off; }
+                 int wantm[3];
+                 for (int _m = 0; _m < 3; _m++) {
+-                    wantm[_m] = s_rt_plan[d].target[_m + 1];
+-                    if (wantm[_m] < 0 && dr->rt_mrt[_m]) temporal_abort(d, -1, "missing MRT plan");
++                    wantm[_m] = no_color ? -1 : s_rt_plan[d].target[_m + 1];
++                    if (!no_color && wantm[_m] < 0 && dr->rt_mrt[_m])
++                        temporal_abort(d, -1, "missing MRT plan");
+                 }
+                 if (want != cur_rt || wantm[0] != cur_m[0] ||
+                     wantm[1] != cur_m[1] || wantm[2] != cur_m[2]) {
+                     D3D12_CPU_DESCRIPTOR_HANDLE rh[4];
+-                    UINT nrt = 1;
++                    UINT nrt = no_color ? 0 : 1;
+                     rh[0] = rtv_handle;
+                     D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
++                    if (no_color) {
++                        vp.Width = (float)dr->surface_meta.clip_w;
++                        vp.Height = (float)dr->surface_meta.clip_h;
++                    }
+                     if (want >= 0) {
+                         off_rt_transition(want, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                         rh[0] = off_rt_rtv(want);
+@@ -4794,7 +4804,8 @@
+                     }
+                     D3D12_RECT sc = {0, 0, (LONG)vp.Width, (LONG)vp.Height};
+                     vp_last_w = vp.Width; vp_last_h = vp.Height;
+-                    s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, nrt, rh, FALSE, &dsv_handle);
++                    s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list,
++                        nrt, nrt ? rh : NULL, FALSE, &dsv_handle);
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
+                     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
+                     s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
+@@ -4875,6 +4886,10 @@
+                 {
+                     float tw = (cur_rt >= 0) ? (float)s_d3d.off_rt[cur_rt].w : (float)s_d3d.width;
+                     float th = (cur_rt >= 0) ? (float)s_d3d.off_rt[cur_rt].h : (float)s_d3d.height;
++                    if (no_color) {
++                        tw = (float)dr->surface_meta.clip_w;
++                        th = (float)dr->surface_meta.clip_h;
++                    }
+                     D3D12_VIEWPORT dvp = {0, 0, tw, th, 0.0f, 1.0f};
+                     if (dr->vp_w >= 2 && dr->vp_h >= 2 &&
+                         (float)(dr->vp_x + dr->vp_w) <= tw + 0.5f &&
+@@ -4940,12 +4955,12 @@
+                   if (rb < 0) { const char* e = getenv("RT_REBIND"); rb = e ? atoi(e) : 0; }
+                   if (rb) {
+                       D3D12_CPU_DESCRIPTOR_HANDLE brh[4];
+-                      UINT bn = 1;
++                      UINT bn = no_color ? 0 : 1;
+                       brh[0] = (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
+                       for (int _m = 0; _m < 3; _m++)
+                           if (cur_m[_m] >= 0) brh[bn++] = off_rt_rtv(cur_m[_m]);
+                       s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
+-                          s_d3d.cmd_list, bn, brh, FALSE, &dsv_handle);
++                          s_d3d.cmd_list, bn, bn ? brh : NULL, FALSE, &dsv_handle);
+                   } }
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
+@@ -4966,7 +4981,7 @@
+             }
+             if (perf_on()) s_perf_gpu += perf_now() - _rec0;   /* reuse: record time */
+             /* Leave the backbuffer bound for the dump/present epilogue. */
+-            if (cur_rt >= 0) {
++            if (cur_rt != -1) {
+                 s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
+                 D3D12_VIEWPORT vp = {0, 0, (float)s_d3d.width, (float)s_d3d.height, 0.0f, 1.0f};
+                 D3D12_RECT sc = {0, 0, (LONG)s_d3d.width, (LONG)s_d3d.height};
+@@ -5585,7 +5600,9 @@
+      * until its composite draw arrives, or the screen strobes intermediates. */
+     int have_display_draws = 0;
+     for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; i++)
+-        if (rsx_d3d12_draw_targets_display(s_d3d.draws[i].rt_off, s_d3d.draws[i].rt_mrt, s_d3d.draws[i].is_clear)) {
++        if (rsx_d3d12_draw_targets_display_ext(s_d3d.draws[i].rt_off,
++                s_d3d.draws[i].rt_mrt, s_d3d.draws[i].is_clear,
++                s_d3d.draws[i].surface_meta.color_target)) {
+             have_display_draws = 1;
+             break;
+         }
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -58,7 +58,7 @@
+  * Returns 1 if display content, 0 if offscreen-only, clear, or MRT. */
+ static inline int rsx_d3d12_draw_targets_display_ext(u32 rt_off, const u32 rt_mrt[3], int is_clear, u32 surface_color_target)
+ {
+-    if (is_clear) return 0;
++    if (is_clear || surface_color_target == CELL_GCM_SURFACE_TARGET_NONE) return 0;
+ 
+     /* Reject surface_color_target == 0x17 (CELL_GCM_SURFACE_TARGET_MRT2)
+      * or any MRT (surface_color_target >= 0x13). */
+@@ -79,7 +79,10 @@
+ 
+ static inline int rsx_d3d12_draw_targets_display(u32 rt_off, const u32 rt_mrt[3], int is_clear)
+ {
+-    return rsx_d3d12_draw_targets_display_ext(rt_off, rt_mrt, is_clear, 0);
++    /* The compatibility API has no declared selector. Callers with a real
++     * snapshot must use _ext so NONE is not mistaken for display storage. */
++    return rsx_d3d12_draw_targets_display_ext(rt_off, rt_mrt, is_clear,
++        CELL_GCM_SURFACE_TARGET_0);
+ }
+ 
+ /* Presentation gates accept a real display color clear. The frame-boundary
+--- a/libs/video/rsx_d3d12_temporal_plan.h
++++ b/libs/video/rsx_d3d12_temporal_plan.h
+@@ -76,8 +76,17 @@
+                 return temporal_plan_fail("partial color clear is unsupported", op, -1);
+         }
+         int target_count = rsx_declared_surface_target_count(&dr->surface_meta);
+-        if (target_count < 1)
++        if (target_count < 0)
+             return temporal_plan_fail("unsupported or missing color target selection", op, -1);
++        if (!target_count) {
++            /* NONE is distinct from missing metadata. Preserve the observed
++             * depth-only draw, but never invent a colour producer for it. */
++            if (dr->is_clear || dr->cmask)
++                return temporal_plan_fail("color writes with no target are unsupported", op, -1);
++            if (!dr->surface_meta.clip_w || !dr->surface_meta.clip_h)
++                return temporal_plan_fail("missing no-color target extent", op, -1);
++            continue;
++        }
+         s_rt_plan[op].display_target = dr->rt_off == 0;
+         for (member = 0; member < target_count; ++member) {
+             u32 raw = member ? dr->rt_mrt[member - 1] : dr->rt_off;
+--- a/libs/video/rsx_linear_metadata.h
++++ b/libs/video/rsx_linear_metadata.h
+@@ -18,6 +18,7 @@
+ {
+     if (!m || !m->valid) return RSX_LINEAR_META_ABSENT;
+     switch (m->color_target) {
++    case CELL_GCM_SURFACE_TARGET_NONE: return 0;
+     case CELL_GCM_SURFACE_TARGET_0:
+     case CELL_GCM_SURFACE_TARGET_1: return 1;
+     case CELL_GCM_SURFACE_TARGET_MRT1: return 2;

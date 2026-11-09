@@ -1,0 +1,61 @@
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -793,9 +793,21 @@
+                     (uint32_t)ctx->gpr[3],(uint32_t)ctx->gpr[4],(uint32_t)ctx->gpr[5],
+                     (uint32_t)ctx->gpr[6],(uint32_t)ctx->gpr[7],(uint32_t)ctx->gpr[8]);
+     }
+-    hle_generic fn = (hle_generic)e->handler;
+-    uint64_t r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
+-                    ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10]);
++    uint64_t r;
++    if (nid == 0xEFEB2679u /* _cellSpursWorkloadAttributeInitialize */) {
++        /* PPC64 ELFv1 places integer argument 9 at SP + 48 + 8*8.
++         * Read the BE register image; the handler consumes its low u32. */
++        typedef uint64_t (*hle_nine_args)(uint64_t, uint64_t, uint64_t,
++            uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
++        hle_nine_args fn = (hle_nine_args)e->handler;
++        r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
++               ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10],
++               vm_read64(ctx->gpr[1] + 0x70));
++    } else {
++        hle_generic fn = (hle_generic)e->handler;
++        r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
++               ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10]);
++    }
+     ctx->gpr[3] = r;   /* PPC return value */
+     /* PS3_HLE_PTRCHECK: the guest stores HLE return values as guest pointers, so
+      * an HLE returning a value outside guest RAM (>= 0x10000000) that is not a
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1387,10 +1387,12 @@
+ 
+ /* The SDK-versioned workload-attribute initializer (the import the game links;
+  * NID differs from the non-underscore inline wrapper). Args arrive raw in
+- * r3..r10; writes the REAL BE layout so AddWorkloadWithAttribute round-trips. */
++ * r3..r10 plus maxContention from the guest stack. Writes the REAL BE layout
++ * so AddWorkloadWithAttribute round-trips. */
+ s32 _cellSpursWorkloadAttributeInitialize(u64 attr_ea, u32 revision, u32 sdkVersion,
+                                           u64 pm_ea, u32 size, u64 data,
+-                                          u64 prio_ea, u32 minContention)
++                                          u64 prio_ea, u32 minContention,
++                                          u32 maxContention)
+ {
+     if (!attr_ea) return CELL_SPURS_CORE_ERROR_NULL_POINTER;
+     vm_write32((u32)attr_ea + WKATTR_REVISION,   revision);
+@@ -1402,13 +1404,13 @@
+         *(vm_base + (u32)attr_ea + WKATTR_PRIORITY + i) =
+             prio_ea ? *(vm_base + (u32)prio_ea + i) : 0;
+     vm_write32((u32)attr_ea + WKATTR_MIN_CONT, minContention);
+-    vm_write32((u32)attr_ea + WKATTR_MAX_CONT, 1);   /* 9th arg is beyond the 8-GPR adapter */
++    vm_write32((u32)attr_ea + WKATTR_MAX_CONT, maxContention);
+     vm_write32((u32)attr_ea + WKATTR_NAME_CLASS, 0);
+     vm_write32((u32)attr_ea + WKATTR_NAME_INST,  0);
+     vm_write32((u32)attr_ea + WKATTR_HOOK,     0);
+     vm_write32((u32)attr_ea + WKATTR_HOOK_ARG, 0);
+-    printf("[cellSpurs] _WorkloadAttributeInitialize(attr=0x%08X pm=0x%08X size=%u data=0x%llX minC=%u)\n",
+-           (u32)attr_ea, (u32)pm_ea, size, (unsigned long long)data, minContention);
++    printf("[cellSpurs] _WorkloadAttributeInitialize(attr=0x%08X pm=0x%08X size=%u data=0x%llX minC=%u maxC=%u)\n",
++           (u32)attr_ea, (u32)pm_ea, size, (unsigned long long)data, minContention, maxContention);
+     return CELL_OK;
+ }
+ 

@@ -1,0 +1,204 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -200,7 +200,7 @@
+     u64 identity;           /* unique occupancy, also keys guest-FP PSOs */
+     int pinned;            /* referenced by the currently recorded batch */
+ } VPVSEntry;
+-#define VP_VS_CACHE 16  /* initial allocation; grow when every slot is pinned */
++#define VP_VS_CACHE 64  /* initial allocation; grow when every slot is pinned */
+ 
+ /* Compiled guest-FP pipeline cache: decompiled VS (by cache slot) + decompiled
+  * PS (fragment ucode at fp_addr). */
+@@ -226,13 +226,14 @@
+     u32 depth_key;          /* packed guest depth state (PSO key) */
+     u32 texture_mask;
+     ID3D12PipelineState* pso;
++    u64 last_hit;
+ } VPFPEntry;
+ /* Guest-FP PSO cache. 16 entries thrashed badly: this title needs far more
+  * distinct (fp, vs, blend, rt, cmask, ucode-hash) combinations than that in a
+  * single frame, so the FIFO evicted entries that were needed again immediately
+  * and ~17 shaders were recompiled EVERY frame -- about half the frame's CPU
+  * time. Entries are small (a PSO pointer plus key fields). */
+-#define VP_FP_CACHE 256
++#define VP_FP_CACHE 2048
+ 
+ /* ---------------------------------------------------------------------------
+  * Internal state
+@@ -485,7 +486,15 @@
+  * spend an afternoon optimising the wrong loop. */
+ static double s_perf_tex = 0.0, s_perf_frame = 0.0, s_perf_vtx = 0.0, s_perf_rf = 0.0;
+ static double s_perf_gpu = 0.0, s_perf_pre = 0.0, s_perf_srv = 0.0, s_perf_pso = 0.0;
++#define PSO_HISTORY_CAP 16384
++static u64 s_pso_history[PSO_HISTORY_CAP];
+ static int s_perf_pso_calls = 0, s_perf_pso_miss = 0, s_perf_pso_hashbytes = 0;
++static int s_perf_pso_evictions = 0, s_perf_pso_reused_evicted = 0, s_perf_pso_new_keys = 0;
++static u64 s_pso_lru_counter = 0;
++static int s_diff_vs_idx = 0, s_diff_vs_identity = 0, s_diff_gen = 0, s_diff_blend = 0;
++static int s_diff_nrt = 0, s_diff_rtfmt = 0, s_diff_exp32 = 0, s_diff_ucode_hash = 0;
++static int s_diff_cmask = 0, s_diff_cull = 0, s_diff_cube_mask = 0, s_diff_depth_key = 0;
++static int s_diff_no_fp_match = 0;
+ static u64    s_perf_nverts = 0;
+ static u64    s_perf_texbytes = 0;
+ static int    s_perf_ntex = 0;
+@@ -2114,6 +2123,8 @@
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+     u32 off = cellGcmResolveLocated((fp_addr & 0x3u) == 1, fp_addr & ~0x3u);
+     if (off == 0xFFFFFFFFu) return NULL;
++    u32 used_samplers = rsx_fp_sampler_used_mask(vm_base + off, 4096);
++    if (used_samplers != RSX_FP_SAMPLER_MASK_INVALID) cube_mask &= used_samplers;
+ 
+     /* Content hash: inline constants are patched in place per frame (wave's
+      * stamp), so identity is the BYTES, not the address. */
+@@ -2144,9 +2155,54 @@
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+             s_d3d.vp_fp[i].cull == cull &&
+             s_d3d.vp_fp[i].cube_mask == cube_mask &&
+-            s_d3d.vp_fp[i].depth_key == depth_key)
++            s_d3d.vp_fp[i].depth_key == depth_key) {
++            s_d3d.vp_fp[i].last_hit = ++s_pso_lru_counter;
+             return s_d3d.vp_fp[i].pso;
++        }
+     s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
++    {
++        u64 kh = 14695981039346656037ULL;
++        #define HASH_VAL(v) do { u64 _v = (u64)(v); for(int _b=0;_b<8;_b++){ kh ^= (_v&0xFF); kh *= 1099511628211ULL; _v >>= 8; } } while(0)
++        HASH_VAL(vs_idx); HASH_VAL(vs_identity); HASH_VAL(s_d3d.vp_gen); HASH_VAL(fp_addr);
++        HASH_VAL(blend); HASH_VAL(nrt); HASH_VAL(rtfmt); HASH_VAL(exp32);
++        HASH_VAL(uhash); HASH_VAL(cmask); HASH_VAL(cull); HASH_VAL(cube_mask); HASH_VAL(depth_key);
++        #undef HASH_VAL
++        if (!kh) kh = 1ULL;
++        u32 mask = PSO_HISTORY_CAP - 1;
++        u32 idx = (u32)(kh ^ (kh >> 32)) & mask;
++        int seen_before = 0;
++        for (u32 step = 0; step < PSO_HISTORY_CAP; step++) {
++            u32 slot = (idx + step) & mask;
++            if (s_pso_history[slot] == kh) { seen_before = 1; break; }
++            if (s_pso_history[slot] == 0) { s_pso_history[slot] = kh; break; }
++        }
++        if (seen_before) {
++            s_perf_pso_reused_evicted++;
++        } else {
++            s_perf_pso_new_keys++;
++            int found_fp = 0;
++            for (int i = 0; i < s_d3d.vp_fp_n; i++) {
++                if (s_d3d.vp_fp[i].fp_addr == fp_addr) {
++                    found_fp = 1;
++                    VPFPEntry* q = &s_d3d.vp_fp[i];
++                    if (q->vs_idx != vs_idx) s_diff_vs_idx++;
++                    if (q->vs_identity != vs_identity) s_diff_vs_identity++;
++                    if (q->gen != s_d3d.vp_gen) s_diff_gen++;
++                    if (q->blend != blend) s_diff_blend++;
++                    if (q->nrt != nrt) s_diff_nrt++;
++                    if (q->rtfmt != (u32)rtfmt) s_diff_rtfmt++;
++                    if (q->exp32 != exp32) s_diff_exp32++;
++                    if (q->ucode_hash != uhash) s_diff_ucode_hash++;
++                    if (q->cmask != cmask) s_diff_cmask++;
++                    if (q->cull != cull) s_diff_cull++;
++                    if (q->cube_mask != cube_mask) s_diff_cube_mask++;
++                    if (q->depth_key != depth_key) s_diff_depth_key++;
++                    break;
++                }
++            }
++            if (!found_fp) s_diff_no_fp_match++;
++        }
++    }
+     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
+      * entry for the same program. "the cache misses" is not actionable; "it
+      * misses on ucode_hash" is. */
+@@ -2495,28 +2551,39 @@
+     }
+     { static int _ok=0; if (_ok++<32) printf("[FP] guest FP pipeline ready (fp=0x%08X)\n", fp_addr); }
+ 
+-    /* insert (evict oldest when full) */
+-    if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
+-        if (s_d3d.vp_fp[0].pso) s_d3d.vp_fp[0].pso->lpVtbl->Release(s_d3d.vp_fp[0].pso);
+-        memmove(&s_d3d.vp_fp[0], &s_d3d.vp_fp[1], sizeof(VPFPEntry) * (VP_FP_CACHE - 1));
+-        s_d3d.vp_fp_n = VP_FP_CACHE - 1;
+-    }
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_identity = vs_identity;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].gen     = s_d3d.vp_gen;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].blend   = blend;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].nrt     = nrt;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].rtfmt   = (u32)rtfmt;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].exp32   = exp32;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].ucode_hash = uhash;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].depth_key = depth_key;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].texture_mask = texture_mask;
+-    s_d3d.vp_fp_n++;
++    /* insert (evict least recently used when full) */
++    int insert_slot = s_d3d.vp_fp_n;
++    if (insert_slot >= VP_FP_CACHE) {
++        s_perf_pso_evictions++;
++        int lru_idx = 0;
++        u64 min_hit = s_d3d.vp_fp[0].last_hit;
++        for (int i = 1; i < VP_FP_CACHE; i++) {
++            if (s_d3d.vp_fp[i].last_hit < min_hit) {
++                min_hit = s_d3d.vp_fp[i].last_hit;
++                lru_idx = i;
++            }
++        }
++        if (s_d3d.vp_fp[lru_idx].pso) s_d3d.vp_fp[lru_idx].pso->lpVtbl->Release(s_d3d.vp_fp[lru_idx].pso);
++        insert_slot = lru_idx;
++    } else {
++        s_d3d.vp_fp_n++;
++    }
++    s_d3d.vp_fp[insert_slot].fp_addr = fp_addr;
++    s_d3d.vp_fp[insert_slot].vs_idx  = vs_idx;
++    s_d3d.vp_fp[insert_slot].vs_identity = vs_identity;
++    s_d3d.vp_fp[insert_slot].gen     = s_d3d.vp_gen;
++    s_d3d.vp_fp[insert_slot].blend   = blend;
++    s_d3d.vp_fp[insert_slot].nrt     = nrt;
++    s_d3d.vp_fp[insert_slot].rtfmt   = (u32)rtfmt;
++    s_d3d.vp_fp[insert_slot].exp32   = exp32;
++    s_d3d.vp_fp[insert_slot].ucode_hash = uhash;
++    s_d3d.vp_fp[insert_slot].cmask   = cmask;
++    s_d3d.vp_fp[insert_slot].cull    = cull;
++    s_d3d.vp_fp[insert_slot].cube_mask = cube_mask;
++    s_d3d.vp_fp[insert_slot].depth_key = depth_key;
++    s_d3d.vp_fp[insert_slot].pso     = pso;
++    s_d3d.vp_fp[insert_slot].texture_mask = texture_mask;
++    s_d3d.vp_fp[insert_slot].last_hit = ++s_pso_lru_counter;
+     return pso;
+ }
+ 
+@@ -5085,7 +5152,7 @@
+             double fr = s_perf_frame > 0 ? s_perf_frame : 1;
+             fprintf(stderr, "[PERF] %.2f fps | tex %.2fs (%.0f%%, %d calls) | vtx %.2fs"
+                             " (%.0f%%, %.0fk verts) | render_frame %.2fs (%.0f%%)"
+-                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS %dKB hashed] | guest %.2fs (%.0f%%)%c",
++                            " | prepass %.2fs (%.0f%%) [srv %.2fs %.0f%% | pso %.2fs %.0f%% %d calls %d MISS (%d reused_evicted, %d new_key) %d evicts occ=%d/%d] | guest %.2fs (%.0f%%)%c",
+                     20.0 / fr,
+                     s_perf_tex, 100.0 * s_perf_tex / fr, s_perf_ntex,
+                     s_perf_vtx, 100.0 * s_perf_vtx / fr,
+@@ -5094,11 +5161,23 @@
+                     s_perf_pre, 100.0 * s_perf_pre / fr,
+                     s_perf_srv, 100.0 * s_perf_srv / fr,
+                     s_perf_pso, 100.0 * s_perf_pso / fr,
+-                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_hashbytes / 1024,
++                    s_perf_pso_calls, s_perf_pso_miss, s_perf_pso_reused_evicted, s_perf_pso_new_keys, s_perf_pso_evictions, s_d3d.vp_fp_n, VP_FP_CACHE,
+                     fr - s_perf_rf, 100.0 * (fr - s_perf_rf) / fr, 10);
+             s_perf_frame = 0.0; s_perf_tex = 0.0; s_perf_vtx = 0.0; s_perf_rf = 0.0;
+             s_perf_gpu = 0.0; s_perf_pre = 0.0; s_perf_srv = 0.0; s_perf_pso = 0.0;
++            if (s_perf_pso_miss > 0) {
++                fprintf(stderr, "[PSOBREAKDOWN] new_keys=%d no_fp_match=%d | diffs: vs_idx=%d vs_id=%d gen=%d blend=%d nrt=%d rtfmt=%d exp32=%d ucode=%d cmask=%d cull=%d cube=%d depth=%d\n",
++                        s_perf_pso_new_keys, s_diff_no_fp_match,
++                        s_diff_vs_idx, s_diff_vs_identity, s_diff_gen, s_diff_blend,
++                        s_diff_nrt, s_diff_rtfmt, s_diff_exp32, s_diff_ucode_hash,
++                        s_diff_cmask, s_diff_cull, s_diff_cube_mask, s_diff_depth_key);
++            }
+             s_perf_pso_calls = 0; s_perf_pso_miss = 0; s_perf_pso_hashbytes = 0;
++            s_perf_pso_evictions = 0; s_perf_pso_reused_evicted = 0; s_perf_pso_new_keys = 0;
++            s_diff_vs_idx = 0; s_diff_vs_identity = 0; s_diff_gen = 0; s_diff_blend = 0;
++            s_diff_nrt = 0; s_diff_rtfmt = 0; s_diff_exp32 = 0; s_diff_ucode_hash = 0;
++            s_diff_cmask = 0; s_diff_cull = 0; s_diff_cube_mask = 0; s_diff_depth_key = 0;
++            s_diff_no_fp_match = 0;
+             s_perf_ntex = 0; s_perf_texbytes = 0; s_perf_nverts = 0;
+         }
+     }

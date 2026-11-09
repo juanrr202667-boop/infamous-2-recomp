@@ -1,0 +1,104 @@
+diff --git a/libs/video/rsx_d3d12_temporal_plan.h b/libs/video/rsx_d3d12_temporal_plan.h
+--- a/libs/video/rsx_d3d12_temporal_plan.h
++++ b/libs/video/rsx_d3d12_temporal_plan.h
+@@ -81,7 +81,7 @@
+         if (!target_count) {
+             /* NONE is distinct from missing metadata. Preserve the observed
+              * depth-only draw, but never invent a colour producer for it. */
+-            if (dr->is_clear || dr->cmask)
++            if ((dr->is_clear && (dr->surface_meta.clear_flags & 0xF0u)) || dr->cmask)
+                 return temporal_plan_fail("color writes with no target are unsupported", op, -1);
+             if (!dr->surface_meta.clip_w || !dr->surface_meta.clip_h)
+                 return temporal_plan_fail("missing no-color target extent", op, -1);
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4756,7 +4756,7 @@
+             for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+                 const D3D12DrawRecord* dr = &s_d3d.draws[d];
+                 if (!dr->is_vp) continue;
+-                if (dr->is_clear && !(dr->surface_meta.clear_flags & 0xF0u)) continue;
++                if (dr->is_clear && !(dr->surface_meta.clear_flags & (0xF0u | 0x03u))) continue;
+                 temporal_before_op(d);
+                 if (s_rt_plan[d].display_target) s_had_direct_backbuffer = 1;
+                 /* The reduced-viewport passes (this title's reflection, drawn
+@@ -4778,7 +4778,13 @@
+                 }
+                 /* Render-to-texture: retarget when this op's surfaces differ.
+                  * Depth is a single shared buffer, so clear it per switch. */
+-                int no_color = dr_num_rts(dr) == 0;
++                /* A depth/stencil-only clear may still carry a stale colour
++                 * target in the surface metadata. It must not require a colour
++                 * destination plan: the guest is clearing depth, not colour. */
++                int depth_only_clear = dr->is_clear &&
++                    (dr->surface_meta.clear_flags & 0x03u) &&
++                    !(dr->surface_meta.clear_flags & 0xF0u);
++                int no_color = dr_num_rts(dr) == 0 || depth_only_clear;
+                 int want = no_color ? -2 :
+                     (s_rt_plan[d].display_target ? -1 : s_rt_plan[d].target[0]);
+                 if (!no_color && want < 0 && dr->rt_off)
+@@ -4816,8 +4822,6 @@
+                         nrt, nrt ? rh : NULL, FALSE, &dsv_handle);
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &vp);
+                     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &sc);
+-                    s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list, dsv_handle,
+-                        D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, NULL);
+                     /* RT_CLEARDBG=2: magenta-clear the surface the DRAWS bind,
+                      * at the moment they bind it. The guest's own clears may go
+                      * to a different surface entirely (they do here: clears to
+@@ -4864,22 +4868,39 @@
+                     for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
+                 }
+                 if (dr->is_clear) {
+-                    if (!(dr->surface_meta.clear_flags & 0xF0u)) continue;
+-                    /* RT_CLEARDBG=1: clear offscreen targets to magenta only
+-                     * within the same captured clip/scissor as the guest. */
+-                    static int cd = -1;
+-                    if (cd < 0) { const char* e = getenv("RT_CLEARDBG"); cd = e ? atoi(e) : 0; }
+-                    const float mag[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+-                    for (int member = 0; member < 4; ++member) {
+-                        int slot = member ? cur_m[member - 1] : cur_rt;
+-                        if (member && slot < 0) continue;
+-                        u32 width = slot >= 0 ? s_d3d.off_rt[slot].w : s_d3d.width;
+-                        u32 height = slot >= 0 ? s_d3d.off_rt[slot].h : s_d3d.height;
+-                        D3D12_RECT rect = temporal_clear_rect(dr, width, height);
+-                        if (rect.left == rect.right || rect.top == rect.bottom) continue;
+-                        D3D12_CPU_DESCRIPTOR_HANDLE rh = slot >= 0 ? off_rt_rtv(slot) : rtv_handle;
+-                        s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list,
+-                            rh, (cd && slot >= 0) ? mag : dr->cc, 1, &rect);
++                    u32 clr_flags = dr->surface_meta.clear_flags;
++                    if (!(clr_flags & (0xF0u | 0x03u))) continue;
++                    if (clr_flags & 0x03u) {
++                        D3D12_CLEAR_FLAGS dsv_flags = (D3D12_CLEAR_FLAGS)0;
++                        if (clr_flags & 0x01u) dsv_flags |= D3D12_CLEAR_FLAG_DEPTH;
++                        if (clr_flags & 0x02u) dsv_flags |= D3D12_CLEAR_FLAG_STENCIL;
++                        FLOAT clear_depth = dr->surface_meta.valid ? dr->surface_meta.clear_depth : 1.0f;
++                        UINT8 clear_stencil = dr->surface_meta.valid ? (UINT8)dr->surface_meta.clear_stencil : 0;
++                        D3D12_RECT rect = temporal_clear_rect(dr, s_d3d.width, s_d3d.height);
++                        int full = (!dr->surface_meta.valid ||
++                                    (rect.left == 0 && rect.top == 0 &&
++                                     rect.right == (LONG)s_d3d.width && rect.bottom == (LONG)s_d3d.height));
++                        s_d3d.cmd_list->lpVtbl->ClearDepthStencilView(s_d3d.cmd_list,
++                            dsv_handle, dsv_flags, clear_depth, clear_stencil,
++                            full ? 0 : 1, full ? NULL : &rect);
++                    }
++                    if (clr_flags & 0xF0u) {
++                        /* RT_CLEARDBG=1: clear offscreen targets to magenta only
++                         * within the same captured clip/scissor as the guest. */
++                        static int cd = -1;
++                        if (cd < 0) { const char* e = getenv("RT_CLEARDBG"); cd = e ? atoi(e) : 0; }
++                        const float mag[4] = {1.0f, 0.0f, 1.0f, 1.0f};
++                        for (int member = 0; member < 4; ++member) {
++                            int slot = member ? cur_m[member - 1] : cur_rt;
++                            if (member && slot < 0) continue;
++                            u32 width = slot >= 0 ? s_d3d.off_rt[slot].w : s_d3d.width;
++                            u32 height = slot >= 0 ? s_d3d.off_rt[slot].h : s_d3d.height;
++                            D3D12_RECT rect = temporal_clear_rect(dr, width, height);
++                            if (rect.left == rect.right || rect.top == rect.bottom) continue;
++                            D3D12_CPU_DESCRIPTOR_HANDLE rh = slot >= 0 ? off_rt_rtv(slot) : rtv_handle;
++                            s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list,
++                                rh, (cd && slot >= 0) ? mag : dr->cc, 1, &rect);
++                        }
+                     }
+                     temporal_after_op(d);
+                     continue;

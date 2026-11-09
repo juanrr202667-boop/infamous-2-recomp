@@ -1,0 +1,61 @@
+--- a/runtime/spu/spu_dispatch_mt.c
++++ b/runtime/spu/spu_dispatch_mt.c
+@@ -14,11 +14,11 @@
+  * image-23 cri hack, lookup miss diagnostics) falls back to the full resolver.
+  */
+ #include "spu_context.h"
++#include "spu_interp.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+ typedef void (*spu_dispatch_fn)(spu_context*);
+-spu_dispatch_fn spu_lookup(uint32_t addr, int image_id);  /* spu_channels.c (exported) */
+ void spu_indirect_branch(spu_context* ctx);               /* full resolver in the lib */
+ 
+ void spu_indirect_branch_mt(spu_context* ctx)
+@@ -55,11 +55,9 @@
+                   || pc == SPURS_TASKSET_PM_SYSCALL_LS
+                   || ctx->image_id == SPU_RESOLVER_ONLY_IMAGE_ID;
+     if (!special) {
+-        /* Resident overlay first (mirrors the full resolver): streamed plugin
+-         * code owns its LS range; base-image entries at the same address are
+-         * stale bytes and must lose. */
+-        spu_dispatch_fn fn = ctx->resident_ovl ? spu_lookup(pc, ctx->resident_ovl) : 0;
+-        if (!fn) fn = spu_lookup(pc, ctx->image_id);
++        /* Share ownership with the interpreter and full resolver. In
++         * particular, an unlifted resident owner must block stale base hits. */
++        spu_dispatch_fn fn = spu_lifted_lookup(ctx, pc);
+         if (fn) {
+             ctx->pc = pc;
+             __attribute__((musttail)) return fn(ctx);
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2427,7 +2427,9 @@
+      * ila header identifies which of the 89 lifted job modules it is; match it and
+      * mark that overlay resident so the module's lifted functions dispatch. The
+      * module arrives via a DMA LIST, so the single-GET note_get hook never fired. */
+-    if (!fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->pc >= 0x4000 && ctx->pc < 0x3E000) {
++    /* These WWS guesses apply only without a known code owner. An owner's
++     * missing translation must execute its live bytes through the interpreter. */
++    if (!code_owner && !fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->pc >= 0x4000 && ctx->pc < 0x3E000) {
+         uint32_t codeBase = ((uint32_t)ctx->ls[0x1320] << 24) | ((uint32_t)ctx->ls[0x1321] << 16) |
+                             ((uint32_t)ctx->ls[0x1322] << 8) | ctx->ls[0x1323];
+         if (codeBase + 16 <= SPU_LS_SIZE) {
+@@ -2456,7 +2458,7 @@
+      * file offset: that ran garbage, the job did no work, and its ring slot
+      * never advanced -> the loader's job ring deadlocked. An empty buffer falls
+      * through to the null-job handling below. */
+-    if (!fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->policy_mode &&
++    if (!code_owner && !fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->policy_mode &&
+         ctx->pc >= 0x4000 && ctx->pc < 0x3E000) {
+         uint32_t w0 = ((uint32_t)ctx->ls[ctx->pc] << 24) | ((uint32_t)ctx->ls[ctx->pc+1] << 16) |
+                       ((uint32_t)ctx->ls[ctx->pc+2] << 8) | ctx->ls[ctx->pc+3];
+@@ -2468,7 +2470,7 @@
+      * bookkeeping -- exactly as a real job that did nothing and returned.
+      * (Falling to the SMC microstep would log a spurious BRANCH-TO-0 on the
+      * 0x00000000 word; this is the same outcome, quiet.) */
+-    if (!fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->policy_mode &&
++    if (!code_owner && !fn && (ctx->image_id == 1 || ctx->image_id == 2) && ctx->policy_mode &&
+         ctx->pc >= 0x4000 && ctx->pc < 0x3E000 &&
+         ((uint32_t)ctx->ls[ctx->pc] | ctx->ls[ctx->pc+1] |
+          ctx->ls[ctx->pc+2] | ctx->ls[ctx->pc+3]) == 0) {

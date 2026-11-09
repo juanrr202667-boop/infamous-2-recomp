@@ -1,0 +1,82 @@
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -67,7 +67,8 @@
+ 
+ typedef struct { uint64_t t0, t1; uint32_t a, b, who, kind; } ps3_ft_rec;
+ 
+-enum { PS3_FT_TIDS = 256 };
++enum { PS3_FT_TIDS = 256, PS3_FT_SLEEP_SITES = 4 };
++typedef struct { uint64_t t0, t1; uint32_t lr, n; } ps3_ft_sleep_run;
+ 
+ typedef struct {
+     int on;              /* 0 unknown, 1 initialising, 2 recording, 3 off/done */
+@@ -77,7 +78,7 @@
+     uint64_t base, start, end, min, merge;
+     ps3_ft_rec* buf;
+     char path[1024];
+-    struct { uint64_t t0, t1; uint32_t lr, n; } us[PS3_FT_TIDS];   /* usleep run being merged */
++    ps3_ft_sleep_run us[PS3_FT_TIDS][PS3_FT_SLEEP_SITES];
+     char names[PS3_FT_TIDS][28];
+ } ps3_ft_state;
+ 
+@@ -103,11 +104,12 @@
+     __atomic_store_n(&s->on, 3, __ATOMIC_SEQ_CST);
+     while (__atomic_load_n(&s->writers, __ATOMIC_SEQ_CST)) { }
+     /* Close the open usleep runs; their threads may still be in them. */
+-    for (uint32_t t = 0; t < PS3_FT_TIDS; t++) {
+-        if (!s->us[t].n) continue;
++    for (uint32_t t = 0; t < PS3_FT_TIDS; t++) for (uint32_t k = 0; k < PS3_FT_SLEEP_SITES; k++) {
++        ps3_ft_sleep_run* run = &s->us[t][k];
++        if (!run->n) continue;
+         const uint32_t i = __atomic_fetch_add(&s->n, 1, __ATOMIC_RELAXED);
+-        if (i >= s->cap) break;
+-        ps3_ft_rec r = { s->us[t].t0, s->us[t].t1, s->us[t].n, s->us[t].lr, t, PS3_FT_USLEEP };
++        if (i >= s->cap) { __atomic_fetch_add(&s->dropped, 1, __ATOMIC_RELAXED); continue; }
++        ps3_ft_rec r = { run->t0, run->t1, run->n, run->lr, t, PS3_FT_USLEEP };
+         s->buf[i] = r;
+     }
+     uint32_t n = __atomic_load_n(&s->n, __ATOMIC_ACQUIRE);
+@@ -210,23 +212,35 @@
+     ps3_ft_leave(s);
+ }
+ 
+-/* sys_timer_usleep polls come tens of thousands a second; consecutive sleeps of
+- * one thread from one call site within PS3_FTRACE_MERGE_US become one span.
+- * Only the sleeping thread touches its slot. */
++/* Keep several call sites per thread so alternating poll sites can merge.
++ * Spans can overlap and include time between calls; they are not CPU time. */
+ static inline void ps3_ft_usleep(uint32_t tid, uint32_t lr, uint64_t t0, uint64_t t1)
+ {
+     ps3_ft_state* s = &g_ps3_ft;
+     if (tid >= PS3_FT_TIDS || __atomic_load_n(&s->on, __ATOMIC_RELAXED) != 2) return;
+     if (t0 > s->end) { ps3_ft_dump(); return; }
+     if (!ps3_ft_enter(s)) return;
+-    if (s->us[tid].n && s->us[tid].lr == lr && t0 - s->us[tid].t1 <= s->merge) {
+-        s->us[tid].t1 = t1; s->us[tid].n++;
++    ps3_ft_sleep_run* slots = s->us[tid];
++    uint32_t selected = PS3_FT_SLEEP_SITES;
++    for (uint32_t k = 0; k < PS3_FT_SLEEP_SITES; ++k)
++        if (slots[k].n && slots[k].lr == lr) { selected = k; break; }
++    if (selected == PS3_FT_SLEEP_SITES)
++        for (uint32_t k = 0; k < PS3_FT_SLEEP_SITES; ++k)
++            if (!slots[k].n) { selected = k; break; }
++    if (selected == PS3_FT_SLEEP_SITES) {
++        selected = 0;
++        for (uint32_t k = 1; k < PS3_FT_SLEEP_SITES; ++k)
++            if (slots[k].t1 < slots[selected].t1) selected = k;
++    }
++    ps3_ft_sleep_run* run = &slots[selected];
++    if (run->n && run->lr == lr && t0 >= run->t1 && t0 - run->t1 <= s->merge) {
++        run->t1 = t1; run->n++;
+         ps3_ft_leave(s);
+         return;
+     }
+-    if (s->us[tid].n)
+-        ps3_ft_span(PS3_FT_USLEEP, tid, s->us[tid].n, s->us[tid].lr, s->us[tid].t0, s->us[tid].t1);
+-    s->us[tid].t0 = t0; s->us[tid].t1 = t1; s->us[tid].lr = lr; s->us[tid].n = 1;
++    if (run->n)
++        ps3_ft_span(PS3_FT_USLEEP, tid, run->n, run->lr, run->t0, run->t1);
++    run->t0 = t0; run->t1 = t1; run->lr = lr; run->n = 1;
+     ps3_ft_leave(s);
+ }
+ 

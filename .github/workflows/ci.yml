@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-checks:
+    name: Repository and patch integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install metadata dependencies
+        run: python -m pip install pyyaml
+      - name: Reject proprietary files and secrets
+        run: python scripts/check_forbidden_files.py --tracked
+      - name: Validate patch manifest and order
+        run: |
+          python scripts/generate_patch_manifest.py --check
+          python scripts/patch_stack.py --static
+      - name: Verify public snapshot and personal paths
+        run: python scripts/check_publication_manifest.py
+      - name: Validate JSON and GitHub YAML
+        run: |
+          python -m json.tool CMakePresets.json > /dev/null
+          python -m json.tool scripts/patches/manifest.json > /dev/null
+          python - <<'PY'
+          import glob, yaml
+          for path in glob.glob('.github/**/*.yml', recursive=True):
+              with open(path, encoding='utf-8') as handle:
+                  yaml.safe_load(handle)
+          print('GitHub YAML parsed')
+          PY
+      - name: Check relative documentation links
+        run: python scripts/check_docs_links.py
+      - name: Parse PowerShell without executing it
+        shell: pwsh
+        run: ./scripts/check_powershell_syntax.ps1
+
+  python:
+    name: Python tests (Linux subset)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run OS-independent tests
+        run: |
+          python -m pytest -q -ra \
+            tests/test_forbidden_files.py \
+            tests/test_patch_manifest.py \
+            tests/test_publication_manifest.py \
+            tests/test_regression_gate.py \
+            tests/test_build_infrastructure.py \
+            tests/test_inspect_game.py \
+            tests/test_inspect_gcm_chain.py \
+            tests/test_audio_analyzer.py \
+            tests/test_audio_downmix.py \
+            tests/test_menu_witness.py \
+            tests/test_live_dashboard.py
+      - name: Explain the Windows-only remainder
+        run: |
+          echo "Native fixtures and Windows-specific tests run in the windows-tests job."
+          echo "A skipped test is not a pass."
+
+  windows-tests:
+    name: Windows synthetic build and tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Parse PowerShell
+        shell: pwsh
+        run: ./scripts/check_powershell_syntax.ps1
+      - name: Prepare pinned SDK and Python environment
+        shell: pwsh
+        run: ./scripts/setup.ps1
+      - name: Build synthetic fixtures
+        shell: pwsh
+        run: ./scripts/build.ps1 -Target tests
+      - name: Run native tests (including WARP)
+        shell: pwsh
+        run: ./scripts/test.ps1 -Suite native -IncludeGpu
+      - name: Run Python tests
+        shell: pwsh
+        run: ./scripts/test.ps1 -Suite python
+      - name: Regression gate
+        shell: pwsh
+        run: ./scripts/test.ps1 -Regression -IncludeGpu
+      - name: Upload regression report (sanitized)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report
+          path: |
+            build/regression/report.md
+            build/regression/report.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload environment report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: environment-report
+          path: build/setup/environment.json
+          if-no-files-found: warn
+          retention-days: 14

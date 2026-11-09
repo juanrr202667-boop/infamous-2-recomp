@@ -1,0 +1,139 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1873,6 +1873,86 @@
+                  * truncates them.  Reconstruct the full address the same way
+                  * the draw-engine call above does. */
+                 { const u32 mfull = (subch << 13) | m;
++                /* Observe binds before the existing routing decision. Repeated
++                 * values are counted per subchannel/method, not logged again.
++                 * I2_RSX_SHADER_BINDS=1 permits 1024 transitions; N>1 sets the
++                 * cap. No extra guest reads occur when the observer is off. */
++                unsigned i2_shader_record = 0;
++                u32 i2_shader_data = 0, i2_shader_before = 0, i2_control_before = 0;
++                u64 i2_shader_repeats = 0, i2_shader_qpc = 0, i2_shader_frequency = 0;
++                u64 i2_shader_us = 0;
++                const char* i2_shader_route =
++                    (mfull == 0xEB00u || mfull == 0xEB04u) ? "cellGcmQueueUserCommand" :
++                    (mfull == 0xE920u || mfull == 0xE924u) ? "cellGcmSetFlipCommand" :
++                    (subch == 0 || (subch == 1 && !s1_2d))
++                        ? "rsx_process_method" : "gcm_2d_method";
++                if (m == 0 || m == NV4097_SET_SHADER_PROGRAM || m == NV4097_SET_SHADER_CONTROL) {
++                    static int initialized = 0, capped = 0;
++                    static u32 limit = 0, records = 0;
++                    static struct { int have; u32 value; u64 repeats; } observed[8][3];
++                    if (!initialized) {
++                        const char* e = getenv("I2_RSX_SHADER_BINDS");
++                        unsigned long requested = e && *e ? strtoul(e, NULL, 10) : 0;
++                        limit = requested == 1 ? 1024u : (u32)requested;
++                        initialized = 1;
++                    }
++                    if (limit && subch < 8) {
++                        const u32 index = m == 0 ? 0u : m == NV4097_SET_SHADER_PROGRAM ? 1u : 2u;
++                        const u32 value = vm_read32(dea);
++                        if (observed[subch][index].have && observed[subch][index].value == value) {
++                            observed[subch][index].repeats++;
++                        } else {
++                            i2_shader_repeats = observed[subch][index].repeats;
++                            observed[subch][index].have = 1;
++                            observed[subch][index].value = value;
++                            observed[subch][index].repeats = 0;
++                            if (records < limit) {
++                                i2_shader_record = ++records;
++                                i2_shader_data = value;
++                                i2_shader_before = s_state.shader_program;
++                                i2_control_before = s_state.shader_control;
++#ifdef _WIN32
++                                LARGE_INTEGER ticks;
++                                ensure_qpc_init();
++                                QueryPerformanceCounter(&ticks);
++                                i2_shader_qpc = (u64)ticks.QuadPart;
++                                i2_shader_frequency = (u64)s_qpc_freq.QuadPart;
++                                i2_shader_us = i2_shader_qpc / i2_shader_frequency * 1000000ULL +
++                                    i2_shader_qpc % i2_shader_frequency * 1000000ULL / i2_shader_frequency;
++#else
++                                i2_shader_qpc = get_timestamp_ns();
++                                i2_shader_frequency = 1000000000ULL;
++                                i2_shader_us = i2_shader_qpc / 1000ULL;
++#endif
++                            } else if (!capped) {
++                                capped = 1;
++                                fprintf(stderr, "[i2-rsx-shader-bind] cap_reached=%u further_transitions_not_logged=1\n", limit);
++                            }
++                        }
++                    }
++                }
++                /* RSX_METHOD_PICK=<raw FP hex> records only the first interval
++                 * bound to that program. Entry and exit binds are included;
++                 * the 512-word cap never changes FIFO routing or guest state. */
++                static int i2_pick_initialized = 0, i2_pick_started = 0;
++                static int i2_pick_active = 0, i2_pick_done = 0, i2_pick_capped = 0;
++                static u32 i2_pick = 0, i2_pick_records = 0;
++                static u64 i2_pick_words = 0;
++                u32 i2_pick_before = 0, i2_pick_data = 0;
++                int i2_pick_have_data = 0;
++                if (!i2_pick_initialized) {
++                    const char* e = getenv("RSX_METHOD_PICK");
++                    i2_pick = e && *e ? (u32)strtoul(e, NULL, 16) : 0;
++                    i2_pick_initialized = 1;
++                }
++                if (i2_pick && !i2_pick_done) {
++                    i2_pick_before = s_state.shader_program;
++                    if (i2_pick_records < 512u &&
++                        (i2_pick_active || (!i2_pick_started && m == NV4097_SET_SHADER_PROGRAM))) {
++                        i2_pick_data = vm_read32(dea);
++                        i2_pick_have_data = 1;
++                    }
++                }
+                 if (mfull == 0xEB00u || mfull == 0xEB04u) {
+                     cellGcmQueueUserCommand(vm_read32(dea));
+                 } else if (mfull == 0xE920u || mfull == 0xE924u) {
+@@ -1897,6 +1977,49 @@
+                     }
+                 } else
+                     gcm_2d_method(subch, m, vm_read32(dea));
++                if (i2_pick && !i2_pick_done) {
++                    if (!i2_pick_started && s_state.shader_program == i2_pick) {
++                        i2_pick_started = i2_pick_active = 1;
++                        fprintf(stderr, "[i2-rsx-method-pick] start=1 pick=0x%08X data_io=0x%08X\n",
++                                i2_pick, s_fifo_getoff + 4 + i * 4);
++                    }
++                    if (i2_pick_active) {
++                        i2_pick_words++;
++                        if (i2_pick_records < 512u) {
++                            if (!i2_pick_have_data) i2_pick_data = vm_read32(dea);
++                            fprintf(stderr, "[i2-rsx-method-pick] word=%u subchannel=%u method=0x%04X data=0x%08X "
++                                    "get=0x%08X put=0x%08X data_io=0x%08X data_ea=0x%08X "
++                                    "shader_before=0x%08X shader_after=0x%08X route=%s\n",
++                                    ++i2_pick_records, subch, m, i2_pick_data, s_fifo_getoff, put,
++                                    s_fifo_getoff + 4 + i * 4, dea, i2_pick_before,
++                                    s_state.shader_program, i2_shader_route);
++                        } else if (!i2_pick_capped) {
++                            i2_pick_capped = 1;
++                            fprintf(stderr, "[i2-rsx-method-pick] cap_reached=512 pick=0x%08X further_words_not_logged=1\n",
++                                    i2_pick);
++                        }
++                        if (s_state.shader_program != i2_pick) {
++                            i2_pick_active = 0;
++                            i2_pick_done = 1;
++                            fprintf(stderr, "[i2-rsx-method-pick] stop=1 pick=0x%08X words_seen=%llu words_logged=%u "
++                                    "cap_reached=%d data_io=0x%08X shader_after=0x%08X\n",
++                                    i2_pick, (unsigned long long)i2_pick_words, i2_pick_records,
++                                    i2_pick_capped, s_fifo_getoff + 4 + i * 4, s_state.shader_program);
++                        }
++                    }
++                }
++                if (i2_shader_record) {
++                    fprintf(stderr, "[i2-rsx-shader-bind] record=%u qpc=%llu qpc_freq=%llu t_us=%llu t_ms=%llu "
++                            "get=0x%08X put=0x%08X data_io=0x%08X data_ea=0x%08X header=0x%08X "
++                            "subchannel=%u method=0x%04X data=0x%08X shader_before=0x%08X shader_after=0x%08X "
++                            "control_before=0x%08X control_after=0x%08X route=%s repeat_suppressed=%llu\n",
++                            i2_shader_record, (unsigned long long)i2_shader_qpc,
++                            (unsigned long long)i2_shader_frequency, (unsigned long long)i2_shader_us,
++                            (unsigned long long)(i2_shader_us / 1000ULL), s_fifo_getoff, put,
++                            s_fifo_getoff + 4 + i * 4, dea, w, subch, m, i2_shader_data,
++                            i2_shader_before, s_state.shader_program, i2_control_before, s_state.shader_control,
++                            i2_shader_route, (unsigned long long)i2_shader_repeats);
++                }
+                 }
+             }
+             s_fifo_getoff += 4 + count * 4;

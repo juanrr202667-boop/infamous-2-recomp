@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or proprietary-material report
+    url: https://github.com/juanrr202667-boop/infamous-2-recomp/security/advisories/new
+    about: Report a secret, key, or proprietary file privately; do not open a public issue.
+  - name: Current project status
+    url: https://github.com/juanrr202667-boop/infamous-2-recomp/blob/main/docs/public-status.md
+    about: Check what is and is not validated before filing a gameplay or rendering report.

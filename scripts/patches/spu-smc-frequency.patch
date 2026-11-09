@@ -1,0 +1,60 @@
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -21,6 +21,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <setjmp.h>
++#include <errno.h>
+ #ifndef _WIN32
+ #include <sched.h>   /* sched_yield */
+ #endif
+@@ -1904,6 +1905,40 @@
+  * the small instruction set such stubs use, and exit back into lifted code at
+  * the first branch (trampoline re-dispatch). Returns 1 if it executed to a
+  * branch, 0 on an unknown opcode (caller falls through to BRANCH-TO-0). */
++/* Opt-in fallback frequency observation. No guest state or interpreter
++ * control-flow changes; counts are process-wide for each image/opcode. */
++static void i2_smc_frequency(spu_context* ctx, uint32_t opcode, uint32_t pc)
++{
++    if ((opcode != 0x144 && opcode != 0x1c4) || ctx->image_id < 0 || ctx->image_id >= 64)
++        return;
++    const int saved_errno = errno;
++    const DWORD saved_error = GetLastError();
++    static volatile LONG enabled = 0;
++    if (spu_trace_setting(&enabled, "I2_SMC_FREQUENCY")) {
++        static volatile LONG every_cache = 0;
++        LONG every = InterlockedCompareExchange(&every_cache, 0, 0);
++        if (!every) {
++            const char* value = getenv("I2_SMC_FREQUENCY_EVERY");
++            char* end = NULL;
++            unsigned long parsed = value ? strtoul(value, &end, 10) : 0;
++            LONG wanted = value && *value && end && !*end && parsed > 0 && parsed <= 10000000
++                ? (LONG)parsed : 65536;
++            every = InterlockedCompareExchange(&every_cache, wanted, 0);
++            if (!every) every = wanted;
++        }
++        static volatile long long counts[64][2];
++        const unsigned which = opcode == 0x144 ? 0u : 1u;
++        const unsigned long long n = (unsigned long long)InterlockedIncrement64(&counts[ctx->image_id][which]);
++        if (n == 1 || n % (unsigned long long)every == 0) {
++            fprintf(stderr, "[i2-smc-frequency] t_ms=%llu image=%d op=%s pc=%05X count=%llu concurrent=1\n",
++                (unsigned long long)GetTickCount64(), ctx->image_id,
++                which ? "lqx" : "stqx", pc, n);
++        }
++    }
++    SetLastError(saved_error);
++    errno = saved_errno;
++}
++
+ static int spu_smc_microstep(spu_context* ctx)
+ {
+     uint32_t pc = ctx->pc & SPU_LS_MASK & ~3u;
+@@ -2052,6 +2087,7 @@
+               fprintf(stderr, "[spu-smc] microstep img=%d pc=0x%05X word 0x%08X not in the"
+                       " microstep set -- handing to the interpreter (steps=%d)\n",
+                       ctx->image_id, pc, w, steps); }
++        i2_smc_frequency(ctx, op11, pc);
+         ctx->pc = pc;
+         /* Stop at the drain's return point too: it sits mid-function, so it is
+          * no lifted entry, and a job's return would otherwise run on through

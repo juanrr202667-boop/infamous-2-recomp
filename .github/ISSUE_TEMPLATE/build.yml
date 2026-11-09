@@ -1,0 +1,66 @@
+name: Build or toolchain problem
+description: CMake, clang-cl, SDK checkout, patches, or test-runner failure
+title: "[Build]: "
+labels: ["build", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not upload an EBOOT, ELF, ISO, PKG, save, firmware, key, or game asset.
+        The synthetic suite must work without the game; say clearly whether the
+        failure happens before or after a local game input is needed.
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Content policy
+      options:
+        - label: I did not include proprietary files or personal paths in logs.
+          required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      render: powershell
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Error output
+      description: The first actionable error, with local paths replaced by `<repo>`.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: Windows, CMake, Ninja, clang-cl, VS Build Tools, Windows SDK, Python
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      options:
+        - setup.ps1
+        - cmake configure
+        - compile
+        - link
+        - ctest
+        - pytest
+        - regression gate
+        - full port with local inputs
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks already tried
+      description: For example `scripts/setup.ps1 -CheckOnly`, `patch_stack.py --check --json`, clean build directory.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Success criterion
+      description: The command that should finish, and the expected result summary.
+    validations:
+      required: true

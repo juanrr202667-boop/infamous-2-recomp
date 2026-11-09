@@ -1,0 +1,238 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -843,6 +843,86 @@
+     if (l2w > l2h)      off |= (x >> n) << (2 * n);
+     else if (l2h > l2w) off |= (y >> n) << (2 * n);
+     return off;
++}
++
++static cellGcmTransferProbeObserver s_transfer_probe_observer;
++void cellGcmSetTransferProbeObserver(cellGcmTransferProbeObserver observer)
++{
++    s_transfer_probe_observer = observer;
++}
++
++typedef struct GcmProbeSample {
++    u32 first, last, hash, valid, nonzero;
++} GcmProbeSample;
++
++/* Sixteen sparse BE words at a 4x4 grid, excluding row padding. This is an
++ * observation, not a checksum of the complete surface or a freshness proof. */
++static GcmProbeSample gcm_probe_sample(u32 ea, u32 pitch, u32 w, u32 h)
++{
++    GcmProbeSample result = {0, 0, 2166136261u, 0, 0};
++    const u64 limit = ppu_vm_size ? ppu_vm_size : 0x100000000ULL;
++    if (!vm_base || !w || !h) return result;
++    for (u32 y = 0; y < 4; ++y) {
++        for (u32 x = 0; x < 4; ++x) {
++            const u32 index = y * 4 + x;
++            const u64 at = (u64)ea + ((u64)(h - 1) * y / 3) * pitch +
++                           ((u64)(w - 1) * x / 3) * 4;
++            u8 bytes[4];
++            if (at + 4 > limit) continue;
++#ifdef _WIN32
++            SIZE_T copied = 0;
++            if (!ReadProcessMemory(GetCurrentProcess(), vm_base + at, bytes, 4, &copied) || copied != 4)
++                continue;
++#else
++            memcpy(bytes, vm_base + at, 4);
++#endif
++            const u32 word = ((u32)bytes[0] << 24) | ((u32)bytes[1] << 16) |
++                             ((u32)bytes[2] << 8) | bytes[3];
++            result.valid |= 1u << index;
++            if (!index) result.first = word;
++            if (index == 15) result.last = word;
++            if (word) ++result.nonzero;
++            for (u32 b = 0; b < 4; ++b) result.hash = (result.hash ^ bytes[b]) * 16777619u;
++        }
++    }
++    return result;
++}
++
++static int gcm_probe_begin(cellGcmTransferProbe* event, u32 src, u32 dst,
++        u32 w, u32 h, u32 sp, u32 dp)
++{
++    static const char* gate;
++    static int initialized, maximum;
++    static u32 count;
++    if (!initialized) {
++        gate = getenv("NV3089_PROBE_GATE");
++        const char* cap = getenv("NV3089_PROBE_MAX");
++        maximum = cap ? atoi(cap) : 8;
++        if (maximum < 1 || maximum > 64) maximum = 8;
++        initialized = 1;
++    }
++    if (!gate || !*gate || count >= (u32)maximum) return 0;
++    /* Deliberately observe only the verified linear ARGB 1:1, zero-origin
++     * path. Scaled, swizzled and clipped transfers need different samples. */
++    if ((s_nv3089.fmt & 0xFF) != 3 || s_nv309e.active ||
++            s_nv3089.ds_dx != 0x100000 || s_nv3089.dt_dy != 0x100000 ||
++            s_nv3089.in_uv || s_nv3089.out_pt || s_nv3089.clip_pt ||
++            ((s_nv3089.clip_sz & 0xFFFF) && (s_nv3089.clip_sz & 0xFFFF) < w) ||
++            ((s_nv3089.clip_sz >> 16) && (s_nv3089.clip_sz >> 16) < h) ||
++            (u64)w * 4 > sp || (u64)w * 4 > dp) return 0;
++    FILE* ready = fopen(gate, "rb");
++    if (!ready) return 0;
++    fclose(ready);
++    event->id = count++;
++    event->source_ea = src; event->destination_ea = dst;
++    event->source_offset = s_nv3089.in_off;
++    event->destination_offset = s_gcm2d.dst_offset;
++    event->source_location = s_nv3089.src_dma == 0xFEED0001u ? 2u : 1u;
++    event->destination_location = s_gcm2d.dst_dma == 0xFEED0001u ? 2u : 1u;
++    event->width = w; event->height = h;
++    event->source_pitch = sp; event->destination_pitch = dp;
++    if (s_transfer_probe_observer) s_transfer_probe_observer(event);
++    return 1;
+ }
+ 
+ static void nv3089_blit(void)
+@@ -988,6 +1068,14 @@
+     u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
+              : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
+     u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
++    cellGcmTransferProbe probe;
++    const int probing = bpp == 4 && gcm_probe_begin(&probe, src, dst,
++        out_w, out_h, in_pitch, dst_pitch);
++    GcmProbeSample source_sample = {0}, before_sample = {0};
++    if (probing) {
++        source_sample = gcm_probe_sample(src, in_pitch, out_w, out_h);
++        before_sample = gcm_probe_sample(dst, dst_pitch, out_w, out_h);
++    }
+     for (u32 y = 0; y < out_h; y++) {
+         u32 dy = out_y + y;
+         if (dy < cy0 || dy >= cy1) continue;
+@@ -1004,6 +1092,19 @@
+             else if (bpp == 2) vm_write16(d, vm_read16(s));
+             else               vm_write8(d, vm_read8(s));
+         }
++    }
++    if (probing) {
++        const GcmProbeSample after = gcm_probe_sample(dst, dst_pitch, out_w, out_h);
++        printf("[NV3089P] id=%u src=%u:%08X/%u dst=%u:%08X/%u size=%ux%u "
++               "src_first=%08X src_last=%08X src_hash=%08X src_valid=%04X src_nonzero=%u "
++               "before_first=%08X before_last=%08X before_hash=%08X before_valid=%04X "
++               "after_first=%08X after_last=%08X after_hash=%08X after_valid=%04X after_nonzero=%u sparse=16\n",
++               probe.id, probe.source_location, src, in_pitch,
++               probe.destination_location, dst, dst_pitch, out_w, out_h,
++               source_sample.first, source_sample.last, source_sample.hash,
++               source_sample.valid, source_sample.nonzero,
++               before_sample.first, before_sample.last, before_sample.hash, before_sample.valid,
++               after.first, after.last, after.hash, after.valid, after.nonzero);
+     }
+     { static int _n = 0; static int cap = -1;
+       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
+--- a/libs/video/cellGcmSys.h
++++ b/libs/video/cellGcmSys.h
+@@ -20,6 +20,34 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++
++/* Optional same-thread, read-only observation before a linear NV3089 copy.
++ * Locations use the explicit probe convention: 1 LOCAL, 2 MAIN. Registration
++ * belongs to backend initialization/shutdown, before/after FIFO processing. */
++typedef struct cellGcmTransferProbe {
++    u32 id, source_ea, destination_ea;
++    u32 source_offset, destination_offset;
++    u32 source_location, destination_location;
++    u32 width, height, source_pitch, destination_pitch;
++} cellGcmTransferProbe;
++typedef void (*cellGcmTransferProbeObserver)(const cellGcmTransferProbe*);
++void cellGcmSetTransferProbeObserver(cellGcmTransferProbeObserver observer);
++
++/* Shared metadata association; this does not assert GPU content validity. */
++static inline int cellGcmTransferProbeFits(const cellGcmTransferProbe* event,
++        u32 location, u32 offset, u32 pitch, u32 width, u32 height)
++{
++    if (!event || !pitch || !width || !height || !event->width || !event->height ||
++            location != event->source_location || pitch != event->source_pitch ||
++            event->source_offset < offset || (u64)width * 4 > pitch ||
++            (u64)offset + (u64)(height - 1) * pitch + (u64)width * 4 > 0x100000000ULL)
++        return 0;
++    const u32 delta = event->source_offset - offset;
++    const u32 row = delta / pitch, byte_x = delta % pitch;
++    if ((byte_x & 3u) || row >= height || (u64)byte_x >= (u64)width * 4) return 0;
++    return (u64)byte_x + (u64)event->width * 4 <= (u64)width * 4 &&
++        event->height <= height - row;
++}
+ 
+ /* ---------------------------------------------------------------------------
+  * Constants
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -18,6 +18,7 @@
+ 
+ #include <time.h>
+ #include "rsx_d3d12_backend.h"
++#include "cellGcmSys.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
+@@ -7039,6 +7040,50 @@
+  * Public API
+  * -----------------------------------------------------------------------*/
+ 
++/* Metadata only: never submit, wait, map, write guest bytes or mutate replay.
++ * A declared producer does not prove rasterized pixels. Completed view epochs
++ * belong to earlier submissions when the relevant operations remain pending. */
++static void d3d12_transfer_probe(const cellGcmTransferProbe* event)
++{
++    u32 declared = 0, last = UINT32_MAX, views = 0;
++    u64 newest = 0;
++    for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; ++i) {
++        const D3D12DrawRecord* draw = &s_d3d.draws[i];
++        const rsx_d3d12_surface_metadata* meta = &draw->surface_meta;
++        const int members = rsx_declared_surface_target_count(meta);
++        if (!meta->valid || (draw->is_clear ? !(meta->clear_flags & 0xF0u) : !draw->cmask)) continue;
++        for (int n = 0; n < members; ++n) {
++            const u32 member = n ? (u32)n : (meta->color_target == 2 ? 1u : 0u);
++            if (!(meta->dma_seen & (1u << member))) continue;
++            const u32 dma = meta->color_dma[member];
++            if (dma != 0xFEED0000u && dma != 0xFEED0001u) continue;
++            const u32 location = dma == 0xFEED0001u ? 2u : 1u;
++            if (cellGcmTransferProbeFits(event, location, meta->color_offset[member],
++                    meta->color_pitch[member], draw->rt_w, draw->rt_h)) {
++                ++declared; last = i;
++                break;
++            }
++        }
++    }
++    for (u32 i = 0; i < s_off_rt_count && i < MAX_OFF_RTS; ++i) {
++        const rsx_linear_version* view = &s_off_rt_views[i];
++        if (!s_d3d.off_rt[i].res || view->view.offset > UINT32_MAX ||
++                !cellGcmTransferProbeFits(event, view->view.location, (u32)view->view.offset,
++                    view->view.pitch, view->view.width, view->view.height)) continue;
++        ++views;
++        if (view->complete_at > newest) newest = view->complete_at;
++    }
++    const rsx_state* state = s_d3d.current_rsx_state;
++    printf("[NV3089GPU] id=%u frame=%llu pending_ops=%u declared_color_ops=%u last_color_op=%u "
++           "completed_views=%u newest_epoch=%llu committed_epoch=%llu replay_pending=%d "
++           "src=%u:%08X/%u current_zeta=%08X/%u zeta_dma=%08X surface_format=%08X metadata_only=1\n",
++           event->id, (unsigned long long)s_d3d.frame_count, s_d3d.draw_count, declared, last,
++           views, (unsigned long long)newest, (unsigned long long)s_off_rt_epoch, s_temporal_pending,
++           event->source_location, event->source_offset, event->source_pitch,
++           state ? state->surface_zeta_offset : 0, state ? state->surface_zeta_pitch : 0,
++           state ? state->surface_zeta_dma : 0, state ? state->surface_format : 0);
++}
++
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+ {
+     memset(&s_d3d, 0, sizeof(s_d3d));
+@@ -7099,6 +7144,7 @@
+     s_d3d12_backend.bind_texture      = d3d12_bind_texture;
+ 
+     rsx_set_backend(&s_d3d12_backend);
++    cellGcmSetTransferProbeObserver(d3d12_transfer_probe);
+ 
+     s_d3d.initialized = 1;
+     s_d3d.last_fps_time = GetTickCount64();
+@@ -7110,6 +7156,7 @@
+ void rsx_d3d12_backend_shutdown(void)
+ {
+     if (!s_d3d.initialized) return;
++    cellGcmSetTransferProbeObserver(NULL);
+ 
+     wait_for_gpu();
+     UINT64 completed = s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence);

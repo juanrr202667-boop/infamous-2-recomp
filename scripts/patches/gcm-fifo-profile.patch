@@ -1,0 +1,264 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -17,6 +17,7 @@
+ #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+ #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
++#include "gcm_fifo_profile.h"
+ 
+ /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
+  * command stream into; recorded by cellGcmSetupContext, drained by the RSX. */
+@@ -1555,7 +1556,7 @@
+  * poll-path below. TryAcquire on the poll path avoids re-entrancy (the walker
+  * itself performs guest reads) and never blocks a spinning game thread. */
+ static SRWLOCK s_gcm_fifo_lock = SRWLOCK_INIT;
+-static void gcm_rsx_process_fifo_unlocked(void);
++static void gcm_rsx_process_fifo_unlocked(gcm_fifo_probe* probe);
+ 
+ /* Kick event: a game thread whose fence wait finds the queue DRY signals the
+  * present thread to run the FIFO walker NOW instead of on its next 16 ms
+@@ -1620,9 +1621,15 @@
+ void cellGcm_rsx_process_fifo(void)
+ {
+     const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
++    const int profile = gcm_fifo_profile_enabled();
++    gcm_fifo_probe probe = {0};
++    const uint64_t profile_begin = profile ? gcm_fifo_profile_begin() : 0;
+     AcquireSRWLockExclusive(&s_gcm_fifo_lock);
+-    gcm_rsx_process_fifo_unlocked();
++    const uint64_t profile_locked = profile ? gcm_fifo_profile_now() : 0;
++    gcm_rsx_process_fifo_unlocked(profile ? &probe : NULL);
++    const uint64_t profile_end = profile ? gcm_fifo_profile_now() : 0;
+     ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    if (profile) gcm_fifo_profile_record(&probe, profile_begin, profile_locked, profile_end);
+     if (ft_t0) {
+         const uint64_t t1 = ps3_ft_now();
+         if (t1 - ft_t0 >= ps3_ft_min_ns())
+@@ -1630,7 +1637,7 @@
+     }
+ }
+ 
+-static void gcm_rsx_process_fifo_unlocked(void)
++static void gcm_rsx_process_fifo_unlocked(gcm_fifo_probe* probe)
+ {
+     { static unsigned _n = 0; static unsigned long long _t0 = 0;
+       extern unsigned long long ps3_ms_now(void);
+@@ -1653,7 +1660,10 @@
+      * `put` and the IO table, both of which the syscall layer fills; the one part
+      * that does read the context (the ring-recycle heuristic) is separately guarded
+      * by s_gcm_ctx_out_ea, which stays 0 on that path. */
+-    if (!s_gcm_context_ea && !s_gcm_syscall_mode) return;
++    if (!s_gcm_context_ea && !s_gcm_syscall_mode) {
++        if (probe) probe->reason = "no-context";
++        return;
++    }
+     if (!s_inited) { rsx_state_init(&s_state); s_inited = 1; }
+ 
+     /* Walk the FIFO exactly like the RSX: chase the guest-written `put` (an IO
+@@ -1692,6 +1702,11 @@
+     }
+ 
+     u32 start_off = s_fifo_getoff;
++    if (probe) {
++        probe->has_context = 1;
++        probe->get_start = start_off;
++        probe->put = put;
++    }
+     if (getenv("GCM_DRAINDBG")) {
+         static int n = 0;
+         if (n++ % 60 == 0)
+@@ -2201,6 +2216,13 @@
+         s_fifo_getoff += 4;                    /* unknown word: skip */
+     }
+ 
++    if (probe) {
++        /* The post-decrement condition can leave budget == -1. Count decoded
++         * headers, including control words, without adding a per-header hook. */
++        probe->iterations = 0x100000u - (uint32_t)(budget < 0 ? 0 : budget);
++        probe->tail_start_ns = gcm_fifo_profile_now();
++    }
++
+     /* Walker watchdog for unclassified stops. Recognised branch faults
+      * recover above; intentional self-JUMP waits are excluded below. A walker
+      * that stops for another reason simply freezes `get` for the rest of the run and
+@@ -2360,6 +2382,10 @@
+     AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
+     gcm_ref_publish_one();
+     ReleaseSRWLockExclusive(&s_ref_pub_lock);
++    if (probe) {
++        probe->get_end = s_fifo_getoff;
++        probe->reason = budget <= 0 && !strcmp(why, "caught-up") ? "budget" : why;
++    }
+ }
+ 
+ /* FIFO command-buffer-full callback body. The title's inline gcmReserve calls
+--- /dev/null
++++ b/libs/video/gcm_fifo_profile.h
+@@ -0,0 +1,167 @@
++#ifndef GCM_FIFO_PROFILE_H
++#define GCM_FIFO_PROFILE_H
++
++/* Opt-in observation only. No per-header hook or shared accumulator. */
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#ifdef _WIN32
++#include <windows.h>
++#else
++#include <time.h>
++#include <pthread.h>
++#endif
++
++#if defined(_MSC_VER)
++#define GCM_PROFILE_TLS __declspec(thread)
++#elif defined(__cplusplus)
++#define GCM_PROFILE_TLS thread_local
++#else
++#define GCM_PROFILE_TLS _Thread_local
++#endif
++
++typedef struct gcm_fifo_probe {
++    uint32_t get_start, get_end, put;
++    uint32_t iterations;
++    int has_context;
++    const char* reason;
++    uint64_t tail_start_ns;
++} gcm_fifo_probe;
++
++typedef struct gcm_fifo_profile_window {
++    uint64_t start_ns, calls, lock_wait_ns, walker_ns, tail_ns;
++    uint64_t entry_empty, iterations, pure_park, work_park, no_context;
++    uint64_t empty_walker_ns, empty_lock_wait_ns, pure_park_walker_ns;
++    uint64_t work_calls, work_walker_ns, no_context_walker_ns;
++    uint64_t cpu_start_ns;
++    int cpu_available;
++} gcm_fifo_profile_window;
++
++static GCM_PROFILE_TLS gcm_fifo_profile_window s_gcm_profile_window;
++
++static int gcm_fifo_profile_enabled(void)
++{
++    static GCM_PROFILE_TLS int enabled = -1;
++    if (enabled < 0) {
++        const char* e = getenv("GCM_FIFO_PROFILE");
++        enabled = e && strcmp(e, "1") == 0;
++    }
++    return enabled;
++}
++
++static uint64_t gcm_fifo_profile_now(void)
++{
++#ifdef _WIN32
++    static GCM_PROFILE_TLS uint64_t frequency;
++    LARGE_INTEGER counter;
++    if (!frequency) {
++        LARGE_INTEGER f;
++        QueryPerformanceFrequency(&f);
++        frequency = (uint64_t)f.QuadPart;
++    }
++    QueryPerformanceCounter(&counter);
++    return (uint64_t)counter.QuadPart / frequency * 1000000000ULL +
++        (uint64_t)counter.QuadPart % frequency * 1000000000ULL / frequency;
++#else
++    struct timespec t;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
++#endif
++}
++
++static int gcm_fifo_profile_cpu(uint64_t* ns)
++{
++#ifdef _WIN32
++    FILETIME created, exited, kernel, user;
++    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
++        return 0;
++    *ns = ((((uint64_t)kernel.dwHighDateTime << 32) | kernel.dwLowDateTime) +
++           (((uint64_t)user.dwHighDateTime << 32) | user.dwLowDateTime)) * 100ULL;
++    return 1;
++#else
++    (void)ns;
++    return 0; /* Explicitly unavailable; wall time is never substituted. */
++#endif
++}
++
++static uint64_t gcm_fifo_profile_begin(void)
++{
++    gcm_fifo_profile_window* w = &s_gcm_profile_window;
++    const uint64_t now = gcm_fifo_profile_now();
++    if (!w->calls && !w->start_ns) {
++        w->start_ns = now;
++        w->cpu_available = gcm_fifo_profile_cpu(&w->cpu_start_ns);
++        /* The baseline query is diagnostic overhead, not FIFO lock wait. */
++        return gcm_fifo_profile_now();
++    }
++    return now;
++}
++
++static void gcm_fifo_profile_record(const gcm_fifo_probe* p,
++                                    uint64_t begin, uint64_t locked, uint64_t end)
++{
++    gcm_fifo_profile_window* w = &s_gcm_profile_window;
++    w->calls++;
++    w->lock_wait_ns += locked - begin;
++    w->walker_ns += end - locked;
++    if (p->tail_start_ns) w->tail_ns += end - p->tail_start_ns;
++    w->iterations += p->iterations;
++    const int empty = p->has_context && !p->iterations && p->get_start == p->put;
++    const int parked = p->reason && !strcmp(p->reason, "jump-park");
++    if (!p->has_context) {
++        w->no_context++;
++        w->no_context_walker_ns += end - locked;
++    } else if (empty) {
++        w->entry_empty++;
++        w->empty_walker_ns += end - locked;
++        w->empty_lock_wait_ns += locked - begin;
++    } else if (!(parked && p->iterations == 1)) {
++        w->work_calls++;
++        w->work_walker_ns += end - locked;
++    }
++    if (parked) {
++        if (p->iterations == 1) {
++            w->pure_park++;
++            w->pure_park_walker_ns += end - locked;
++        }
++        else w->work_park++;
++    }
++    if (end - w->start_ns >= 1000000000ULL) {
++        uint64_t cpu_end = 0;
++        const int cpu_ok = gcm_fifo_profile_cpu(&cpu_end);
++        const int cpu_available = w->cpu_available && cpu_ok && cpu_end >= w->cpu_start_ns;
++#ifdef _WIN32
++        const unsigned long tid = GetCurrentThreadId();
++#else
++        const unsigned long tid = (unsigned long)pthread_self();
++#endif
++        fprintf(stderr,
++            "[gcm-fifo-profile] tid=%lu window_ns=%llu end_ns=%llu calls=%llu "
++            "lock_wait_ns=%llu walker_ns=%llu tail_ns=%llu tail_subset=1 "
++            "entry_empty=%llu iterations=%llu pure_park=%llu work_park=%llu "
++            "empty_walker_ns=%llu empty_lock_wait_ns=%llu pure_park_walker_ns=%llu "
++            "work_calls=%llu work_walker_ns=%llu no_context=%llu no_context_walker_ns=%llu "
++            "cpu_available=%d cpu_ns=%llu cpu_boundary_approx=1 "
++            "last_get_start=%08X last_get_end=%08X last_put=%08X last_reason=%s\n",
++            tid, (unsigned long long)(end - w->start_ns), (unsigned long long)end,
++            (unsigned long long)w->calls,
++            (unsigned long long)w->lock_wait_ns, (unsigned long long)w->walker_ns,
++            (unsigned long long)w->tail_ns, (unsigned long long)w->entry_empty,
++            (unsigned long long)w->iterations, (unsigned long long)w->pure_park,
++            (unsigned long long)w->work_park, (unsigned long long)w->empty_walker_ns,
++            (unsigned long long)w->empty_lock_wait_ns, (unsigned long long)w->pure_park_walker_ns,
++            (unsigned long long)w->work_calls, (unsigned long long)w->work_walker_ns,
++            (unsigned long long)w->no_context, (unsigned long long)w->no_context_walker_ns,
++            cpu_available, (unsigned long long)(cpu_available ? cpu_end - w->cpu_start_ns : 0),
++            p->get_start, p->get_end, p->put, p->reason ? p->reason : "unknown");
++        /* Reuse this CPU sample as the next window's baseline. Reporting CPU
++         * cost is included in the following window, rather than hidden. */
++        memset(w, 0, sizeof(*w));
++        w->start_ns = end;
++        w->cpu_start_ns = cpu_end;
++        w->cpu_available = cpu_ok;
++    }
++}
++
++#endif

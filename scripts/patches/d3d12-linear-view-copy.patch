@@ -1,0 +1,89 @@
+--- /dev/null
++++ b/libs/video/rsx_d3d12_linear_copy.h
+@@ -0,0 +1,86 @@
++#ifndef RSX_D3D12_LINEAR_COPY_H
++#define RSX_D3D12_LINEAR_COPY_H
++
++#include <d3d12.h>
++#include <string.h>
++#include "rsx_linear_view.h"
++
++/* C COM interface, matching the backend. Resources must be non-MSAA Texture2D
++ * objects with the view's dimensions/format at subresource 0. State pointers
++ * refer to the pending batch's tracked states;
++ * committing/rolling them back and retaining resources belongs to the caller. */
++typedef struct rsx_d3d12_linear_resource {
++    ID3D12Resource* resource;
++    D3D12_RESOURCE_STATES* state;
++    rsx_linear_view view;
++    DXGI_FORMAT format;
++} rsx_d3d12_linear_resource;
++
++typedef struct rsx_d3d12_linear_copy_context {
++    ID3D12GraphicsCommandList* command;
++    rsx_d3d12_linear_resource* resources;
++    uint32_t count;
++} rsx_d3d12_linear_copy_context;
++
++/* Realize one prevalidated plan span. Invalid input emits no commands and
++ * changes no tracked state. This adapter implements RGBA8 copies only. It does
++ * not manufacture a feedback snapshot or perform format reinterpretation.
++ * Validate the complete plan before emission. On a later failure discard the
++ * whole pending command list: resetting state pointers cannot undo commands. */
++static inline int rsx_d3d12_linear_copy_emit(void* user, uint32_t src,
++        uint32_t dst, const rsx_linear_copy_span* span)
++{
++    rsx_d3d12_linear_copy_context* context = (rsx_d3d12_linear_copy_context*)user;
++    if (!context || !context->command || !context->resources || !span ||
++            src >= context->count || dst >= context->count || !span->width) return 0;
++    rsx_d3d12_linear_resource* s = &context->resources[src];
++    rsx_d3d12_linear_resource* d = &context->resources[dst];
++    if (!s->resource || !d->resource || s->resource == d->resource ||
++            !s->state || !d->state || s->state == d->state ||
++            s->format != DXGI_FORMAT_R8G8B8A8_UNORM || d->format != s->format ||
++            !rsx_linear_view_valid(&s->view) || !rsx_linear_view_valid(&d->view) ||
++            s->view.format_id != 0x85 || d->view.format_id != 0x85 ||
++            s->view.bytes_per_pixel != 4 || d->view.bytes_per_pixel != 4 ||
++            s->view.location != d->view.location ||
++            span->src_y >= s->view.height || span->dst_y >= d->view.height ||
++            (uint64_t)span->src_x + span->width > s->view.width ||
++            (uint64_t)span->dst_x + span->width > d->view.width) return 0;
++    uint64_t sa = s->view.offset + (uint64_t)span->src_y * s->view.pitch + (uint64_t)span->src_x * 4;
++    uint64_t da = d->view.offset + (uint64_t)span->dst_y * d->view.pitch + (uint64_t)span->dst_x * 4;
++    if (sa != da) return 0;
++
++    D3D12_RESOURCE_BARRIER barriers[2];
++    UINT count = 0;
++    memset(barriers, 0, sizeof(barriers));
++    if (*s->state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++        D3D12_RESOURCE_BARRIER* b = &barriers[count++];
++        b->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        b->Transition.pResource = s->resource;
++        b->Transition.StateBefore = *s->state;
++        b->Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        b->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    }
++    if (*d->state != D3D12_RESOURCE_STATE_COPY_DEST) {
++        D3D12_RESOURCE_BARRIER* b = &barriers[count++];
++        b->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        b->Transition.pResource = d->resource;
++        b->Transition.StateBefore = *d->state;
++        b->Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++        b->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    }
++    if (count) context->command->lpVtbl->ResourceBarrier(context->command, count, barriers);
++    *s->state = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    *d->state = D3D12_RESOURCE_STATE_COPY_DEST;
++
++    D3D12_TEXTURE_COPY_LOCATION source, destination;
++    memset(&source, 0, sizeof(source)); memset(&destination, 0, sizeof(destination));
++    source.pResource = s->resource; destination.pResource = d->resource;
++    source.Type = destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    D3D12_BOX box = {span->src_x, span->src_y, 0,
++                     span->src_x + span->width, span->src_y + 1, 1};
++    context->command->lpVtbl->CopyTextureRegion(context->command, &destination,
++            span->dst_x, span->dst_y, 0, &source, &box);
++    return 1;
++}
++
++#endif

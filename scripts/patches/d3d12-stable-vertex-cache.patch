@@ -1,0 +1,210 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -25,6 +25,8 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <math.h>
++#include <limits.h>
++#include "rsx_vp_decompiler.h"
+ 
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+@@ -182,19 +184,19 @@
+     u32 hash;               /* FNV-1a of the ucode */
+     ID3DBlob* vs;
+     int uses_c03;
++    u8* ucode;
++    u32 ucode_bytes;
++    u64 identity;           /* unique occupancy, also keys guest-FP PSOs */
++    int pinned;            /* referenced by the currently recorded batch */
+ } VPVSEntry;
+-#define VP_VS_CACHE 16  /* wave uses 5+ distinct VPs; at 4 the cache
+-                         * thrashed every frame and eviction shifted slots
+-                         * under recorded vs_idx values -- the display mesh
+-                         * drew with the WRONG vertex program (sub-rect +
+-                         * edge slivers instead of fullscreen) */
++#define VP_VS_CACHE 16  /* initial allocation; grow when every slot is pinned */
+ 
+ /* Compiled guest-FP pipeline cache: decompiled VS (by cache slot) + decompiled
+  * PS (fragment ucode at fp_addr). */
+ typedef struct {
+     u32 fp_addr;
+     int vs_idx;             /* VPVSEntry slot this PSO's VS came from */
+-    u32 vs_hash;            /* validates the slot hasn't been evicted */
++    u64 vs_identity;        /* validates the exact occupancy of the VS slot */
+     u32 gen;
+     u32 blend;              /* packed guest blend key (enable+factors+eq, PSO key) */
+     int nrt;                /* bound colour target count (PSO key)       */
+@@ -304,8 +306,10 @@
+     u32                   vp_gen;               /* bumped per VP recompile       */
+     int                   vp_uses_c03;          /* VS references vp_c[0..3]      */
+     VPTexSlot             vp_tex[VP_TEX_SLOTS]; /* per-frame VP texture slots    */
+-    VPVSEntry             vp_vs[VP_VS_CACHE];   /* per-draw decompiled VS cache  */
++    VPVSEntry*            vp_vs;               /* stable indices within a batch */
+     int                   vp_vs_n;
++    int                   vp_vs_capacity;
++    u64                   vp_vs_next_identity;
+     VPFPEntry             vp_fp[VP_FP_CACHE];   /* guest-FP PSO cache            */
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+@@ -1729,9 +1733,19 @@
+     if (vstart >= st->vp_ucode_bytes) vstart = 0;
+     const u8* vuc = st->vp_ucode + vstart;
+     u32 vlen = st->vp_ucode_bytes - vstart;
++    /* The store contains other resident programs after this program's END.
++     * Their uploads must not change this program's identity or trigger compile. */
++    u32 program_instrs = rsx_vp_program_size_instrs(vuc, vlen);
++    if (program_instrs) vlen = program_instrs * 16u;
+     u32 hash = vp_hash_ucode(vuc, vlen);
+-    for (int i = 0; i < s_d3d.vp_vs_n; i++)
+-        if (s_d3d.vp_vs[i].hash == hash) return i;
++    for (int i = 0; i < s_d3d.vp_vs_n; i++) {
++        VPVSEntry* entry = &s_d3d.vp_vs[i];
++        if (entry->hash == hash && entry->ucode_bytes == vlen &&
++                memcmp(entry->ucode, vuc, vlen) == 0) {
++            entry->pinned = 1;
++            return i;
++        }
++    }
+ 
+     static char hlsl[262144];
+     int ni = rsx_vp_decompile(vuc, vlen, hlsl, sizeof hlsl);
+@@ -1796,15 +1810,43 @@
+         static int _e=0; if (_e++<4) printf("[VP] per-draw VS compile FAIL (hash=0x%08X)\n", hash);
+         return -1;
+     }
+-    int slot;
+-    if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
+-    else {  /* evict slot 0 */
+-        if (s_d3d.vp_vs[0].vs) s_d3d.vp_vs[0].vs->lpVtbl->Release(s_d3d.vp_vs[0].vs);
+-        memmove(&s_d3d.vp_vs[0], &s_d3d.vp_vs[1], sizeof(VPVSEntry)*(VP_VS_CACHE-1));
+-        slot = VP_VS_CACHE - 1;
+-    }
++    /* Compile and allocate the key before replacing an existing entry. A draw
++     * stores an integer slot, so neither compact nor replace a pinned entry. */
++    u8* key = (u8*)malloc(vlen);
++    if (!key) { vb->lpVtbl->Release(vb); return -1; }
++    memcpy(key, vuc, vlen);
++    int slot = s_d3d.vp_vs_n;
++    if (slot == s_d3d.vp_vs_capacity) {
++        for (int i = 0; i < s_d3d.vp_vs_n; i++) {
++            if (!s_d3d.vp_vs[i].pinned) { slot = i; break; }
++        }
++    }
++    if (slot == s_d3d.vp_vs_capacity) {
++        if (s_d3d.vp_vs_capacity > INT_MAX / 2) {
++            free(key); vb->lpVtbl->Release(vb); return -1;
++        }
++        int capacity = s_d3d.vp_vs_capacity ? s_d3d.vp_vs_capacity * 2 : VP_VS_CACHE;
++        if ((size_t)capacity > (size_t)-1 / sizeof(VPVSEntry)) {
++            free(key); vb->lpVtbl->Release(vb); return -1;
++        }
++        VPVSEntry* grown = (VPVSEntry*)realloc(s_d3d.vp_vs,
++                                               (size_t)capacity * sizeof(VPVSEntry));
++        if (!grown) { free(key); vb->lpVtbl->Release(vb); return -1; }
++        memset(grown + s_d3d.vp_vs_capacity, 0,
++               (size_t)(capacity - s_d3d.vp_vs_capacity) * sizeof(VPVSEntry));
++        s_d3d.vp_vs = grown;
++        s_d3d.vp_vs_capacity = capacity;
++    }
++    if (slot < s_d3d.vp_vs_n) {
++        s_d3d.vp_vs[slot].vs->lpVtbl->Release(s_d3d.vp_vs[slot].vs);
++        free(s_d3d.vp_vs[slot].ucode);
++    } else s_d3d.vp_vs_n++;
+     s_d3d.vp_vs[slot].hash = hash;
+     s_d3d.vp_vs[slot].vs   = vb;
++    s_d3d.vp_vs[slot].ucode = key;
++    s_d3d.vp_vs[slot].ucode_bytes = vlen;
++    s_d3d.vp_vs[slot].identity = ++s_d3d.vp_vs_next_identity;
++    s_d3d.vp_vs[slot].pinned = 1;
+     s_d3d.vp_vs[slot].uses_c03 =
+         (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
+          strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
+@@ -1822,6 +1864,24 @@
+         s_d3d.current_rsx_state = prev;
+     }
+     return slot;
++}
++
++/* Call only when the complete recorded batch has been consumed or discarded.
++ * PSOs own their compiled code; CPU blobs need no GPU fence after PSO creation. */
++static void vp_vs_release_pins(void)
++{
++    for (int i = 0; i < s_d3d.vp_vs_n; i++) s_d3d.vp_vs[i].pinned = 0;
++}
++
++static void vp_vs_cache_clear(void)
++{
++    for (int i = 0; i < s_d3d.vp_vs_n; i++) {
++        if (s_d3d.vp_vs[i].vs) s_d3d.vp_vs[i].vs->lpVtbl->Release(s_d3d.vp_vs[i].vs);
++        free(s_d3d.vp_vs[i].ucode);
++    }
++    free(s_d3d.vp_vs);
++    s_d3d.vp_vs = NULL;
++    s_d3d.vp_vs_n = s_d3d.vp_vs_capacity = 0;
+ }
+ 
+ /* --- Guest blend state -> packed PSO key ----------------------------------
+@@ -1957,9 +2017,9 @@
+     if (!fp_addr || !vm_base) return NULL;
+     { static int _off=-1; if(_off<0)_off=getenv("FP_OFF")?1:0; if(_off) return NULL; }
+     /* Resolve the VS: the draw's cached per-VP blob, else the primary. */
+-    ID3DBlob* vsb = NULL; u32 vs_hash = 0;
++    ID3DBlob* vsb = NULL; u64 vs_identity = 0;
+     if (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n) {
+-        vsb = s_d3d.vp_vs[vs_idx].vs; vs_hash = s_d3d.vp_vs[vs_idx].hash;
++        vsb = s_d3d.vp_vs[vs_idx].vs; vs_identity = s_d3d.vp_vs[vs_idx].identity;
+     }
+     if (!vsb) { vsb = s_d3d.vp_vs_blob; vs_idx = -1; }
+     if (!vsb) return NULL;
+@@ -1993,7 +2053,7 @@
+     for (int i = 0; i < s_d3d.vp_fp_n; i++)
+         if (s_d3d.vp_fp[i].fp_addr != fp_addr) continue;   /* cheap reject first */
+         else if (s_d3d.vp_fp[i].vs_idx == vs_idx &&
+-            s_d3d.vp_fp[i].vs_hash == vs_hash && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
++            s_d3d.vp_fp[i].vs_identity == vs_identity && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
+             s_d3d.vp_fp[i].blend == blend && s_d3d.vp_fp[i].nrt == nrt &&
+             s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].exp32 == exp32 &&
+             s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
+@@ -2026,7 +2086,7 @@
+             n++;
+             fprintf(stderr, "[PSOMISS] fp=0x%X differs:%s%s%s%s%s%s%s%s%c", fp_addr,
+                     q->vs_idx != vs_idx        ? " vs_idx"     : "",
+-                    q->vs_hash != vs_hash      ? " vs_hash"    : "",
++                    q->vs_identity != vs_identity      ? " vs_identity"    : "",
+                     q->gen != s_d3d.vp_gen     ? " gen"        : "",
+                     q->blend != blend          ? " blend"      : "",
+                     q->nrt != nrt              ? " nrt"        : "",
+@@ -2351,7 +2411,7 @@
+     }
+     s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
+-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_hash = vs_hash;
++    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_identity = vs_identity;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].gen     = s_d3d.vp_gen;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].blend   = blend;
+     s_d3d.vp_fp[s_d3d.vp_fp_n].nrt     = nrt;
+@@ -4778,6 +4838,7 @@
+     s_d3d.vb_offset  = 0; /* reset for next frame */
+     s_d3d.vp_vb_offset = 0;
+     s_d3d.draw_count = 0;
++    vp_vs_release_pins();
+     s_d3d.vp_parity ^= 1;  /* next frame's records go to the other half */
+ 
+     /* Debug: RTT_SAVERT=<hex raw offset>[:frame] copies that offscreen RT
+@@ -5308,6 +5369,7 @@
+     }
+     s_dbg_clears_since_present++;
+     s_d3d.draw_count   = 0;
++    vp_vs_release_pins();
+     s_d3d.vb_offset    = 0;
+     s_d3d.vp_vb_offset = 0;
+ }
+@@ -6711,6 +6773,7 @@
+ 
+     wait_for_gpu();
+     flush_deferred_releases();
++    vp_vs_cache_clear();
+ 
+     for (int i = 0; i < MAX_OFF_RTS; i++) {
+         if (s_d3d.off_rt[i].res) { s_d3d.off_rt[i].res->lpVtbl->Release(s_d3d.off_rt[i].res); s_d3d.off_rt[i].res = NULL; }

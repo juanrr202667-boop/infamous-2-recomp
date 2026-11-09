@@ -1,0 +1,17 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1914,6 +1914,14 @@
+     s_d3d.vp_vs[slot].uses_c03 =
+         (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
+          strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
++    { static int trace = -1; static unsigned logged = 0;
++      if (trace < 0) trace = getenv("VP_COMPILE_TRACE") ? 1 : 0;
++      if (trace && logged++ < 8192) {
++          printf("[VPTRACE] hash=%08X bytes=%u slot=%d identity=%llu capacity=%d%c",
++                 hash, vlen, slot, (unsigned long long)s_d3d.vp_vs[slot].identity,
++                 s_d3d.vp_vs_capacity, 10);
++          fflush(stdout);
++      } }
+     { static int _n=0; if (_n++<6) printf("[VP] per-draw VS cached (hash=0x%08X, %d instrs, slot %d)\n", hash, ni, slot); }
+     /* Build the base VP pipeline here if it does not exist yet. render_frame's
+      * trigger reads s_d3d.current_rsx_state, which by frame end no longer has

@@ -1,0 +1,96 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -370,6 +370,13 @@
+ static rsx_d3d12_feedback_context s_feedback;
+ static rsx_d3d12_display_bridge_context s_display_bridge;
+ static int s_had_direct_backbuffer = 0;
++/* Diagnostic snapshot at composition, not evidence of a successful window Present. */
++static struct {
++    u32 valid, flip_offset, flip_count, explicit_source, copy_source, copy_recorded;
++    int had_direct, direct_slot;
++    u32 direct_offset;
++    u64 direct_epoch;
++} s_present_capture;
+ static rsx_linear_version s_pending_rt_views[MAX_OFF_RTS];
+ static u32 s_off_rt_count;
+ static u64 s_off_rt_epoch, s_pending_rt_epoch;
+@@ -1543,12 +1550,21 @@
+     if (mf) {
+         fprintf(mf, "frame_count=%llu draws=%u backbuffer=%ux%u\n",
+                 (unsigned long long)s_d3d.frame_count, ndraws, s_d3d.width, s_d3d.height);
++        fprintf(mf, "present_selection valid=%u flip_offset=0x%08X flip_count=%u"
++                    " had_direct=%d direct_slot=%d direct_offset=0x%08X direct_epoch=%llu"
++                    " explicit_source=0x%08X copy_recorded=%u copy_source=0x%08X\n",
++                s_present_capture.valid, s_present_capture.flip_offset, s_present_capture.flip_count,
++                s_present_capture.had_direct, s_present_capture.direct_slot, s_present_capture.direct_offset,
++                (unsigned long long)s_present_capture.direct_epoch, s_present_capture.explicit_source,
++                s_present_capture.copy_recorded, s_present_capture.copy_source);
+         for (int i = 0; i < MAX_OFF_RTS; i++)
+-            if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].used)
++            if (s_d3d.off_rt[i].res && (s_d3d.off_rt[i].used ||
++                    (s_present_capture.valid && s_d3d.off_rt[i].off == s_present_capture.flip_offset)))
+                 fprintf(mf, "offrt[%d] off=0x%08X %ux%u dxgi=%u\n", i, s_d3d.off_rt[i].off,
+                         s_d3d.off_rt[i].w, s_d3d.off_rt[i].h, s_d3d.off_rt[i].dxgi);
+         for (u32 i = 0; i < s_off_rt_count; ++i)
+-            if (s_d3d.off_rt[i].used)
++            if (s_d3d.off_rt[i].used || (s_present_capture.valid &&
++                    s_off_rt_views[i].view.offset == s_present_capture.flip_offset))
+                 fprintf(mf, "view[%u] pitch=%u location=%u epoch=%llu\n", i,
+                     s_off_rt_views[i].view.pitch, s_off_rt_views[i].view.location,
+                     (unsigned long long)s_off_rt_views[i].complete_at);
+@@ -1625,7 +1641,8 @@
+                        DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_PRESENT, fi, path);
+     for (int i = 0; i < MAX_OFF_RTS; i++) {
+         OffRT* r = &s_d3d.off_rt[i];
+-        if (!r->res || !r->used) continue;
++        if (!r->res || (!r->used && !(s_present_capture.valid &&
++                r->off == s_present_capture.flip_offset))) continue;
+         snprintf(path, sizeof path, "%s/rt_%08X_view%02d_%ux%u.bmp", dir, r->off, i, r->w, r->h);
+         cap_readback_write(r->res, r->w, r->h, r->dxgi, r->st, fi, path);
+     }
+@@ -3841,6 +3858,10 @@
+             (unsigned long)s_display_bridge.last_hr, slot);
+         temporal_abort(draw, -1, "display writeback failed; discard command list");
+     }
++    s_present_capture.direct_slot = slot;
++    s_present_capture.direct_offset = s_pending_rt_views[slot].view.offset;
++    /* temporal_after_op publishes this operation's epoch after the bridge. */
++    s_present_capture.direct_epoch = s_pending_rt_epoch + 1;
+ }
+ 
+ #include "rsx_d3d12_temporal_replay.h"
+@@ -4113,6 +4134,15 @@
+ 
+ static void composite_present(u32 fi)
+ {
++    if (getenv("RSX_CAP")) {
++        extern u32 cellGcmGetCurrentDisplayBufferOffset(void);
++        extern unsigned cellGcm_flip_request_count(void);
++        s_present_capture.valid = 1;
++        s_present_capture.flip_offset = cellGcmGetCurrentDisplayBufferOffset();
++        s_present_capture.flip_count = cellGcm_flip_request_count();
++        s_present_capture.had_direct = s_had_direct_backbuffer;
++        s_present_capture.explicit_source = s_composite_src;
++    }
+     u32 want = s_composite_src;
+     s_composite_src = 0;
+     int i = -1;
+@@ -4177,6 +4207,9 @@
+     box.left = 0; box.top = 0; box.front = 0;
+     box.right = cw; box.bottom = ch; box.back = 1;
+     s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dl, 0, 0, 0, &sl, &box);
++
++    s_present_capture.copy_recorded = 1;
++    s_present_capture.copy_source = want;
+ 
+     b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+     b[0].Transition.StateAfter  = r->st;
+@@ -4280,6 +4313,8 @@
+     temporal_release_completed_resources();
+     flush_deferred_releases();
+     s_had_direct_backbuffer = 0;
++    memset(&s_present_capture, 0, sizeof s_present_capture);
++    s_present_capture.direct_slot = -1;
+ 
+     /* Compile the real vertex program once its microcode is captured, and keep
+      * the constant bank uploaded for the VS. */

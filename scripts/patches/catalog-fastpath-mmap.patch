@@ -1,0 +1,678 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 567ca2c..8f68bab 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -32,8 +32,10 @@ extern "C" void ydkj_host_bt(const char* tag);
+ #include <fcntl.h>
+ #ifdef _WIN32
+ #include <io.h>          /* open/close on MinGW */
++#include <windows.h>
+ #else
+ #include <unistd.h>
++#include <sys/mman.h>
+ #endif
+ #ifndef O_BINARY
+ #define O_BINARY 0       /* POSIX has no text/binary distinction */
+@@ -155,6 +157,162 @@ static char    g_fd_path[FS_MAX][192];   /* guest path per fd (diagnostics) */
+ static DIR*  g_dirs[FS_MAX];
+ static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
+ 
++/* Fast-path catalog mapping for infamous1.psarc_s */
++struct MappedFile {
++#ifdef _WIN32
++    HANDLE hFile;
++    HANDLE hMapping;
++#else
++    int is_mmap;
++#endif
++    const uint8_t* data;
++    uint64_t size;
++    uint64_t pos;
++    int is_mapped;
++};
++static MappedFile g_mapped_files[FS_MAX];
++
++static int is_fast_catalog_enabled(void)
++{
++    static int s_fast_catalog = -1;
++    if (s_fast_catalog < 0) {
++        const char* e1 = getenv("I2_FAST_CATALOG");
++        const char* e2 = getenv("I2_CATALOG_FASTPATH");
++        s_fast_catalog = ((e1 && atoi(e1) != 0) || (e2 && atoi(e2) != 0)) ? 1 : 0;
++    }
++    return s_fast_catalog;
++}
++
++static void unmap_file(int fd)
++{
++    if (fd < 0 || fd >= FS_MAX || !g_mapped_files[fd].is_mapped) return;
++#ifdef _WIN32
++    if (g_mapped_files[fd].data) {
++        if (g_mapped_files[fd].hMapping != NULL) {
++            UnmapViewOfFile(g_mapped_files[fd].data);
++        } else {
++            free((void*)g_mapped_files[fd].data);
++        }
++    }
++    if (g_mapped_files[fd].hMapping != NULL) {
++        CloseHandle(g_mapped_files[fd].hMapping);
++    }
++    if (g_mapped_files[fd].hFile != INVALID_HANDLE_VALUE && g_mapped_files[fd].hFile != NULL) {
++        CloseHandle(g_mapped_files[fd].hFile);
++    }
++    g_mapped_files[fd].hFile = INVALID_HANDLE_VALUE;
++    g_mapped_files[fd].hMapping = NULL;
++#else
++    if (g_mapped_files[fd].data) {
++        if (g_mapped_files[fd].is_mmap) {
++            munmap((void*)g_mapped_files[fd].data, (size_t)g_mapped_files[fd].size);
++        } else {
++            free((void*)g_mapped_files[fd].data);
++        }
++    }
++#endif
++    g_mapped_files[fd].data = nullptr;
++    g_mapped_files[fd].size = 0;
++    g_mapped_files[fd].pos = 0;
++    g_mapped_files[fd].is_mapped = 0;
++}
++
++static int try_map_file(int fd, const char* hpath)
++{
++    if (fd < 0 || fd >= FS_MAX) return 0;
++    MappedFile* mf = &g_mapped_files[fd];
++    memset(mf, 0, sizeof(*mf));
++#ifdef _WIN32
++    mf->hFile = INVALID_HANDLE_VALUE;
++    HANDLE h = CreateFileA(hpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
++    if (h != INVALID_HANDLE_VALUE) {
++        LARGE_INTEGER sz;
++        if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0) {
++            HANDLE hm = CreateFileMappingA(h, NULL, PAGE_READONLY, 0, 0, NULL);
++            if (hm) {
++                const uint8_t* p = (const uint8_t*)MapViewOfFile(hm, FILE_MAP_READ, 0, 0, 0);
++                if (p) {
++                    mf->hFile = h;
++                    mf->hMapping = hm;
++                    mf->data = p;
++                    mf->size = (uint64_t)sz.QuadPart;
++                    mf->pos = 0;
++                    mf->is_mapped = 1;
++                    fprintf(stderr, "[fs] fast-catalog mmap OK: fd=%d size=%llu MB ('%s')\n",
++                            fd, (unsigned long long)(sz.QuadPart / (1024 * 1024)), hpath);
++                    return 1;
++                }
++                CloseHandle(hm);
++            }
++        }
++        CloseHandle(h);
++    }
++    /* Fallback: heap buffer */
++    FILE* fp = fopen(hpath, "rb");
++    if (fp) {
++        fseek(fp, 0, SEEK_END);
++        long sz = ftell(fp);
++        fseek(fp, 0, SEEK_SET);
++        if (sz > 0) {
++            uint8_t* buf = (uint8_t*)malloc((size_t)sz);
++            if (buf && fread(buf, 1, (size_t)sz, fp) == (size_t)sz) {
++                mf->hFile = INVALID_HANDLE_VALUE;
++                mf->hMapping = NULL;
++                mf->data = buf;
++                mf->size = (uint64_t)sz;
++                mf->pos = 0;
++                mf->is_mapped = 1;
++                fprintf(stderr, "[fs] fast-catalog heap buffer OK: fd=%d size=%ld MB ('%s')\n",
++                        fd, sz / (1024 * 1024), hpath);
++                fclose(fp);
++                return 1;
++            }
++            if (buf) free(buf);
++        }
++        fclose(fp);
++    }
++#else
++    int fno = open(hpath, O_RDONLY);
++    if (fno >= 0) {
++        struct stat st;
++        if (fstat(fno, &st) == 0 && st.st_size > 0) {
++            void* p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fno, 0);
++            if (p != MAP_FAILED) {
++                close(fno);
++                mf->is_mmap = 1;
++                mf->data = (const uint8_t*)p;
++                mf->size = (uint64_t)st.st_size;
++                mf->pos = 0;
++                mf->is_mapped = 1;
++                fprintf(stderr, "[fs] fast-catalog mmap OK: fd=%d size=%lld MB\n", fd, (long long)(st.st_size / (1024 * 1024)));
++                return 1;
++            }
++        }
++        close(fno);
++    }
++    FILE* fp = fopen(hpath, "rb");
++    if (fp) {
++        fseek(fp, 0, SEEK_END);
++        long sz = ftell(fp);
++        fseek(fp, 0, SEEK_SET);
++        if (sz > 0) {
++            uint8_t* buf = (uint8_t*)malloc((size_t)sz);
++            if (buf && fread(buf, 1, (size_t)sz, fp) == (size_t)sz) {
++                mf->data = buf;
++                mf->size = (uint64_t)sz;
++                mf->pos = 0;
++                mf->is_mapped = 1;
++                fclose(fp);
++                return 1;
++            }
++            if (buf) free(buf);
++        }
++        fclose(fp);
++    }
++#endif
++    return 0;
++}
++
+ static int fd_alloc_file(FILE* f)
+ {
+     for (int i = 3; i < FS_MAX; i++) if (!g_files[i] && !g_dirs[i]) { g_files[i] = f; return i; }
+@@ -230,7 +388,9 @@ static void cellFsOpen(ppu_context* ctx)
+      * movies) is diagnosed from the opener: its sibling read path is the one
+      * that is not running. */
+     if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
+-    { char who[64] = "?";
++    if (is_fast_catalog_enabled() && (strstr(gpath, "infamous1.psarc_s") || strstr(hpath, "infamous1.psarc_s"))) {
++        try_map_file(fd, hpath);
++    }    { char who[64] = "?";
+       if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
+           fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
+           /* FS_STACK=<substr>: every open funnels through one guest wrapper, so
+@@ -342,9 +502,14 @@ static void cellFsClose(ppu_context* ctx)
+     int fd = (int)(uint32_t)ctx->gpr[3];
+     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
+-    if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
+-        if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
+-        fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
++    if (fd >= 0 && fd < FS_MAX) {
++        if (g_mapped_files[fd].is_mapped) {
++            unmap_file(fd);
++        }
++        if (g_files[fd]) {
++            if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
++            fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
++        }
+     }
+     ctx->gpr[3] = CELL_OK;
+ }
+@@ -378,7 +543,23 @@ static void cellFsRead(ppu_context* ctx)
+     uint64_t nbytes = ctx->gpr[5];
+     uint32_t nread_ptr = (uint32_t)ctx->gpr[6];
+     if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
+-    uint64_t raw_nbytes = ctx->gpr[5];
++
++    /* Fast-path: satisfy read directly from memory-mapped buffer */
++    if (g_mapped_files[fd].is_mapped && g_mapped_files[fd].data) {
++        if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
++        fs_prefault(buf, nbytes);
++        uint64_t cur_pos = g_mapped_files[fd].pos;
++        size_t n = 0;
++        if (cur_pos < g_mapped_files[fd].size) {
++            uint64_t avail = g_mapped_files[fd].size - cur_pos;
++            n = (size_t)(nbytes < avail ? nbytes : avail);
++            memcpy(vm_base + buf, g_mapped_files[fd].data + cur_pos, n);
++            g_mapped_files[fd].pos = cur_pos + n;
++        }
++        if (nread_ptr) vm_write64(nread_ptr, (uint64_t)n);
++        ctx->gpr[3] = CELL_OK;
++        return;
++    }    uint64_t raw_nbytes = ctx->gpr[5];
+     long fpos_before = ftell(g_files[fd]);
+     if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
+     fs_prefault(buf, nbytes);
+@@ -530,7 +711,20 @@ static void cellFsLseek(ppu_context* ctx)
+     if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
+     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] lseek fd=%d off=%lld whence=%u  (by %s)\n", fd, (long long)off, wh, w); }
+-    int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
++
++    if (g_mapped_files[fd].is_mapped) {
++        int64_t new_pos = 0;
++        if (wh == CELL_FS_SEEK_SET) new_pos = off;
++        else if (wh == CELL_FS_SEEK_CUR) new_pos = (int64_t)g_mapped_files[fd].pos + off;
++        else if (wh == CELL_FS_SEEK_END) new_pos = (int64_t)g_mapped_files[fd].size + off;
++        else { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EINVAL; return; }
++        if (new_pos < 0) new_pos = 0;
++        if ((uint64_t)new_pos > g_mapped_files[fd].size) new_pos = (int64_t)g_mapped_files[fd].size;
++        g_mapped_files[fd].pos = (uint64_t)new_pos;
++        if (pos_ptr) vm_write64(pos_ptr, (uint64_t)new_pos);
++        ctx->gpr[3] = CELL_OK;
++        return;
++    }    int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
+     fseek(g_files[fd], (long)off, worigin);
+     long p = ftell(g_files[fd]);
+     if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
+@@ -583,7 +777,12 @@ static void cellFsFstat(ppu_context* ctx)
+     if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
+     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
+         fprintf(stderr, "[fs] fstat fd=%d  (by %s)\n", fd, w); }
+-    long cur = ftell(g_files[fd]);
++
++    if (g_mapped_files[fd].is_mapped) {
++        if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, g_mapped_files[fd].size);
++        ctx->gpr[3] = CELL_OK;
++        return;
++    }    long cur = ftell(g_files[fd]);
+     fseek(g_files[fd], 0, SEEK_END);
+     long sz = ftell(g_files[fd]);
+     fseek(g_files[fd], cur, SEEK_SET);
+@@ -804,51 +1003,62 @@ static void cellFsAioRead(ppu_context* ctx)
+     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
+         if (ppu_vm_size && (uint64_t)buf + size > ppu_vm_size) size = ppu_vm_size - buf;
+         fs_prefault(buf, size);
+-        /* AIO reads are absolute -- they do not disturb the fd's own file
+-         * position, and the guest interleaves them freely across threads. */
+-#ifdef _WIN32
+-        int fno = _fileno(g_files[fd]);
+-        HANDLE h = (fno >= 0) ? (HANDLE)_get_osfhandle(fno) : INVALID_HANDLE_VALUE;
+-        if (h != INVALID_HANDLE_VALUE) {
+-            uint8_t* dst = vm_base + buf;
+-            uint64_t remaining = size;
+-            uint64_t cur_off = offset;
++        if (g_mapped_files[fd].is_mapped && g_mapped_files[fd].data) {
+             err = CELL_OK;
+-            while (remaining > 0) {
+-                DWORD to_read = (remaining > 0x40000000u) ? 0x40000000u : (DWORD)remaining;
+-                OVERLAPPED ov;
+-                memset(&ov, 0, sizeof(ov));
+-                ov.Offset = (DWORD)(cur_off & 0xFFFFFFFFu);
+-                ov.OffsetHigh = (DWORD)(cur_off >> 32);
+-                DWORD read_bytes = 0;
+-                if (!ReadFile(h, dst, to_read, &read_bytes, &ov)) {
+-                    DWORD werr = GetLastError();
+-                    if (werr == ERROR_HANDLE_EOF) break;
+-                    if (n == 0) err = CELL_FS_EIO;
+-                    break;
+-                }
+-                if (read_bytes == 0) break;
+-                n += read_bytes;
+-                dst += read_bytes;
+-                cur_off += read_bytes;
+-                remaining -= read_bytes;
+-                if (read_bytes < to_read) break;
++            if (offset < g_mapped_files[fd].size) {
++                uint64_t avail = g_mapped_files[fd].size - offset;
++                n = (size_t)(size < avail ? size : avail);
++                memcpy(vm_base + buf, g_mapped_files[fd].data + offset, n);
++            } else {
++                n = 0;
+             }
+         } else {
+-            err = CELL_FS_EIO;
+-        }
++            /* AIO reads are absolute -- they do not disturb the fd's own file
++             * position, and the guest interleaves them freely across threads. */
++#ifdef _WIN32
++            int fno = _fileno(g_files[fd]);
++            HANDLE h = (fno >= 0) ? (HANDLE)_get_osfhandle(fno) : INVALID_HANDLE_VALUE;
++            if (h != INVALID_HANDLE_VALUE) {
++                uint8_t* dst = vm_base + buf;
++                uint64_t remaining = size;
++                uint64_t cur_off = offset;
++                err = CELL_OK;
++                while (remaining > 0) {
++                    DWORD to_read = (remaining > 0x40000000u) ? 0x40000000u : (DWORD)remaining;
++                    OVERLAPPED ov;
++                    memset(&ov, 0, sizeof(ov));
++                    ov.Offset = (DWORD)(cur_off & 0xFFFFFFFFu);
++                    ov.OffsetHigh = (DWORD)(cur_off >> 32);
++                    DWORD read_bytes = 0;
++                    if (!ReadFile(h, dst, to_read, &read_bytes, &ov)) {
++                        DWORD werr = GetLastError();
++                        if (werr == ERROR_HANDLE_EOF) break;
++                        if (n == 0) err = CELL_FS_EIO;
++                        break;
++                    }
++                    if (read_bytes == 0) break;
++                    n += read_bytes;
++                    dst += read_bytes;
++                    cur_off += read_bytes;
++                    remaining -= read_bytes;
++                    if (read_bytes < to_read) break;
++                }
++            } else {
++                err = CELL_FS_EIO;
++            }
+ #else
+-        int fno = fileno(g_files[fd]);
+-        if (fno >= 0) {
+-            uint8_t* dst = vm_base + buf;
+-            size_t to_read = (size > 0x40000000u) ? (size_t)0x40000000u : (size_t)size;
+-            ssize_t res = pread(fno, dst, to_read, (off_t)offset);
+-            if (res >= 0) { n = (size_t)res; err = CELL_OK; }
+-            else { err = CELL_FS_EIO; }
+-        } else {
+-            err = CELL_FS_EIO;
+-        }
++            int fno = fileno(g_files[fd]);
++            if (fno >= 0) {
++                uint8_t* dst = vm_base + buf;
++                size_t to_read = (size > 0x40000000u) ? (size_t)0x40000000u : (size_t)size;
++                ssize_t res = pread(fno, dst, to_read, (off_t)offset);
++                if (res >= 0) { n = (size_t)res; err = CELL_OK; }
++                else { err = CELL_FS_EIO; }
++            } else {
++                err = CELL_FS_EIO;
++            }
+ #endif
++        }
+     }
+     if (getenv("PS3_FSLOG"))
+         fprintf(stderr, "[fs] aio read id=%d fd=%d off=%llu size=%llu -> %zu\n",
+diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
+index 489f8a5..9448209 100644
+--- a/runtime/syscalls/sys_fs.c
++++ b/runtime/syscalls/sys_fs.c
+@@ -22,6 +22,7 @@
+   #include <unistd.h>
+   #include <dirent.h>
+   #include <time.h>     /* nanosleep: the delay in the open-retry loop */
++  #include <sys/mman.h>
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+@@ -31,6 +32,145 @@ sys_fs_fd_info  g_sys_fs_fds[SYS_FS_FD_MAX];
+ sys_fs_dir_info g_sys_fs_dirs[SYS_FS_DIR_MAX];
+ char            g_sys_fs_root[512] = ".";
+ 
++/* ---------------------------------------------------------------------------
++ * Fast-path catalog mapping for infamous1.psarc_s
++ * -----------------------------------------------------------------------*/
++typedef struct sys_fs_mapped_info {
++    const uint8_t* data;
++    uint64_t       size;
++    uint64_t       pos;
++#ifdef _WIN32
++    HANDLE         h_file;
++    HANDLE         h_mapping;
++#else
++    int            is_mmap;
++#endif
++    int            is_mapped;
++} sys_fs_mapped_info;
++
++static sys_fs_mapped_info g_sys_fs_mapped[SYS_FS_FD_MAX];
++
++static int is_sys_fs_fast_catalog_enabled(void)
++{
++    static int s_fast_catalog = -1;
++    if (s_fast_catalog < 0) {
++        const char* e1 = getenv("I2_FAST_CATALOG");
++        const char* e2 = getenv("I2_CATALOG_FASTPATH");
++        s_fast_catalog = ((e1 && atoi(e1) != 0) || (e2 && atoi(e2) != 0)) ? 1 : 0;
++    }
++    return s_fast_catalog;
++}
++
++static void sys_fs_unmap(int slot)
++{
++    if (slot < 0 || slot >= SYS_FS_FD_MAX || !g_sys_fs_mapped[slot].is_mapped) return;
++#ifdef _WIN32
++    if (g_sys_fs_mapped[slot].data) {
++        if (g_sys_fs_mapped[slot].h_mapping != NULL) {
++            UnmapViewOfFile(g_sys_fs_mapped[slot].data);
++        } else {
++            free((void*)g_sys_fs_mapped[slot].data);
++        }
++    }
++    if (g_sys_fs_mapped[slot].h_mapping != NULL) {
++        CloseHandle(g_sys_fs_mapped[slot].h_mapping);
++    }
++    if (g_sys_fs_mapped[slot].h_file != INVALID_HANDLE_VALUE && g_sys_fs_mapped[slot].h_file != NULL) {
++        CloseHandle(g_sys_fs_mapped[slot].h_file);
++    }
++    g_sys_fs_mapped[slot].h_file = INVALID_HANDLE_VALUE;
++    g_sys_fs_mapped[slot].h_mapping = NULL;
++#else
++    if (g_sys_fs_mapped[slot].data) {
++        if (g_sys_fs_mapped[slot].is_mmap) {
++            munmap((void*)g_sys_fs_mapped[slot].data, (size_t)g_sys_fs_mapped[slot].size);
++        } else {
++            free((void*)g_sys_fs_mapped[slot].data);
++        }
++    }
++#endif
++    g_sys_fs_mapped[slot].data = NULL;
++    g_sys_fs_mapped[slot].size = 0;
++    g_sys_fs_mapped[slot].pos = 0;
++    g_sys_fs_mapped[slot].is_mapped = 0;
++}
++
++static int sys_fs_try_map(int slot, const char* host_path)
++{
++    if (slot < 0 || slot >= SYS_FS_FD_MAX) return 0;
++    sys_fs_mapped_info* mf = &g_sys_fs_mapped[slot];
++    memset(mf, 0, sizeof(*mf));
++#ifdef _WIN32
++    mf->h_file = INVALID_HANDLE_VALUE;
++    HANDLE h = CreateFileA(host_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
++    if (h != INVALID_HANDLE_VALUE) {
++        LARGE_INTEGER sz;
++        if (GetFileSizeEx(h, &sz) && sz.QuadPart > 0) {
++            HANDLE hm = CreateFileMappingA(h, NULL, PAGE_READONLY, 0, 0, NULL);
++            if (hm) {
++                const uint8_t* p = (const uint8_t*)MapViewOfFile(hm, FILE_MAP_READ, 0, 0, 0);
++                if (p) {
++                    mf->h_file = h;
++                    mf->h_mapping = hm;
++                    mf->data = p;
++                    mf->size = (uint64_t)sz.QuadPart;
++                    mf->pos = 0;
++                    mf->is_mapped = 1;
++                    fprintf(stderr, "[sys_fs] fast-catalog mmap OK: slot=%d size=%llu MB ('%s')\n",
++                            slot, (unsigned long long)(sz.QuadPart / (1024 * 1024)), host_path);
++                    return 1;
++                }
++                CloseHandle(hm);
++            }
++        }
++        CloseHandle(h);
++    }
++    /* Fallback: heap buffer */
++    FILE* fp = fopen(host_path, "rb");
++    if (fp) {
++        _fseeki64(fp, 0, SEEK_END);
++        int64_t sz = _ftelli64(fp);
++        _fseeki64(fp, 0, SEEK_SET);
++        if (sz > 0) {
++            uint8_t* buf = (uint8_t*)malloc((size_t)sz);
++            if (buf && fread(buf, 1, (size_t)sz, fp) == (size_t)sz) {
++                mf->h_file = INVALID_HANDLE_VALUE;
++                mf->h_mapping = NULL;
++                mf->data = buf;
++                mf->size = (uint64_t)sz;
++                mf->pos = 0;
++                mf->is_mapped = 1;
++                fprintf(stderr, "[sys_fs] fast-catalog heap buffer OK: slot=%d size=%lld MB ('%s')\n",
++                        slot, (long long)(sz / (1024 * 1024)), host_path);
++                fclose(fp);
++                return 1;
++            }
++            if (buf) free(buf);
++        }
++        fclose(fp);
++    }
++#else
++    int fno = open(host_path, O_RDONLY);
++    if (fno >= 0) {
++        struct stat st;
++        if (fstat(fno, &st) == 0 && st.st_size > 0) {
++            void* p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fno, 0);
++            if (p != MAP_FAILED) {
++                close(fno);
++                mf->is_mmap = 1;
++                mf->data = (const uint8_t*)p;
++                mf->size = (uint64_t)st.st_size;
++                mf->pos = 0;
++                mf->is_mapped = 1;
++                return 1;
++            }
++        }
++        close(fno);
++    }
++#endif
++    return 0;
++}
++
+ static void write_be32(uint32_t addr, uint32_t val)
+ {
+     uint32_t* p = (uint32_t*)vm_to_host(addr);
+@@ -434,6 +574,10 @@ int64_t sys_fs_open(ppu_context* ctx)
+     strncpy(f->path, host_path, sizeof(f->path) - 1);
+     f->path[sizeof(f->path) - 1] = '\0';
+ 
++    if (is_sys_fs_fast_catalog_enabled() && strstr(host_path, "infamous1.psarc_s")) {
++        sys_fs_try_map(slot, host_path);
++    }
++
+     /* FD is slot + 3 (reserve 0=stdin, 1=stdout, 2=stderr) */
+     int32_t fd = slot + 3;
+     write_be32(fd_out, (uint32_t)fd);
+@@ -464,6 +608,22 @@ int64_t sys_fs_read(ppu_context* ctx)
+     if (!f->active || !f->fp)
+         return (int64_t)(int32_t)CELL_EBADF;
+ 
++    if (g_sys_fs_mapped[slot].is_mapped && g_sys_fs_mapped[slot].data) {
++        void* buf = vm_to_host(buf_addr);
++        if (size) vm_commit(buf_addr, (uint32_t)size);
++        uint64_t cur_pos = g_sys_fs_mapped[slot].pos;
++        size_t nread = 0;
++        if (cur_pos < g_sys_fs_mapped[slot].size) {
++            uint64_t avail = g_sys_fs_mapped[slot].size - cur_pos;
++            nread = (size_t)(size < avail ? size : avail);
++            memcpy(buf, g_sys_fs_mapped[slot].data + cur_pos, nread);
++            g_sys_fs_mapped[slot].pos = cur_pos + nread;
++        }
++        if (nread_addr != 0) {
++            write_be64(nread_addr, (uint64_t)nread);
++        }
++        return CELL_OK;
++    }
+     void* buf = vm_to_host(buf_addr);
+     long pos_before = ftell(f->fp);
+     /* The VM commits pages on first user-mode touch; a read the CRT hands to
+@@ -569,6 +729,9 @@ int64_t sys_fs_close(ppu_context* ctx)
+     if (!f->active)
+         return (int64_t)(int32_t)CELL_EBADF;
+ 
++    if (g_sys_fs_mapped[slot].is_mapped) {
++        sys_fs_unmap(slot);
++    }
+     if (f->fp) {
+         fclose(f->fp);
+         f->fp = NULL;
+@@ -609,6 +772,20 @@ int64_t sys_fs_lseek(ppu_context* ctx)
+         return 0;
+     }
+ 
++    if (g_sys_fs_mapped[slot].is_mapped) {
++        int64_t new_pos = 0;
++        if (whence == CELL_FS_SEEK_SET) new_pos = offset;
++        else if (whence == CELL_FS_SEEK_CUR) new_pos = (int64_t)g_sys_fs_mapped[slot].pos + offset;
++        else if (whence == CELL_FS_SEEK_END) new_pos = (int64_t)g_sys_fs_mapped[slot].size + offset;
++        else return (int64_t)(int32_t)CELL_EINVAL;
++        if (new_pos < 0) new_pos = 0;
++        if ((uint64_t)new_pos > g_sys_fs_mapped[slot].size) new_pos = (int64_t)g_sys_fs_mapped[slot].size;
++        g_sys_fs_mapped[slot].pos = (uint64_t)new_pos;
++        if (pos_addr != 0) {
++            write_be64(pos_addr, (uint64_t)new_pos);
++        }
++        return CELL_OK;
++    }
+     int origin;
+     switch (whence) {
+         case CELL_FS_SEEK_SET: origin = SEEK_SET; break;
+@@ -716,6 +893,18 @@ int64_t sys_fs_fstat(ppu_context* ctx)
+     if (!f->active || !f->fp)
+         return (int64_t)(int32_t)CELL_EBADF;
+ 
++    if (g_sys_fs_mapped[slot].is_mapped) {
++        struct stat st_fake;
++        memset(&st_fake, 0, sizeof(st_fake));
++#ifdef _WIN32
++        st_fake.st_mode = _S_IFREG | 0644;
++#else
++        st_fake.st_mode = S_IFREG | 0644;
++#endif
++        st_fake.st_size = (off_t)g_sys_fs_mapped[slot].size;
++        fill_cell_stat(stat_addr, &st_fake);
++        return CELL_OK;
++    }
+     struct stat st;
+ #ifdef _WIN32
+     int fno = _fileno(f->fp);
+diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
+index d8f4081..a3a7e07 100644
+--- a/runtime/syscalls/sys_timer.c
++++ b/runtime/syscalls/sys_timer.c
+@@ -9,6 +9,16 @@
+ #include <string.h>
+ #include <stdlib.h>
+ 
++#if defined(_WIN32)
++#  if defined(_MSC_VER)
++#    include <intrin.h>
++#  elif defined(_M_X64) || defined(__x86_64__)
++#    include <immintrin.h>
++#  endif
++#else
++#  include <sched.h>
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Globals
+  * -----------------------------------------------------------------------*/
+@@ -213,6 +223,20 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         ppu_log_host_chain("usleep1ms"); } }
+ 
+ #ifdef _WIN32
++    /* Short usleep pacing optimization:
++     * When usec <= 100, avoid CreateWaitableTimerW and replace the heavy QPC loop
++     * with _mm_pause() and SwitchToThread() yield to relieve the bottleneck of
++     * tens of thousands of usleep calls per second. */
++    if (usec <= 100) {
++#if defined(_M_X64) || defined(__x86_64__)
++        _mm_pause();
++#elif defined(_MSC_VER)
++        YieldProcessor();
++#endif
++        SwitchToThread();
++        return CELL_OK;
++    }
++
+     /* Use high-resolution sleep via waitable timer for better precision */
+     if (usec >= 1000) {
+         HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+@@ -226,7 +250,7 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+             Sleep((DWORD)(usec / 1000));
+         }
+     } else if (usec > 0) {
+-        /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
++        /* Sub-millisecond sleep (101-999 us). Sleep()/waitable timers round up to the
+          * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies
+          * on accurate microsecond pacing -- a short usleep() spin waiting on
+          * another thread to make progress otherwise collapses to a single yield
+@@ -245,6 +269,13 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         } while (qpc_now.QuadPart < qpc_deadline);
+     }
+ #else
++    if (usec <= 100) {
++#if defined(__x86_64__) || defined(_M_X64)
++        __builtin_ia32_pause();
++#endif
++        sched_yield();
++        return CELL_OK;
++    }
+     if (usec > 0) {
+         struct timespec ts;
+         ts.tv_sec  = (time_t)(usec / 1000000);

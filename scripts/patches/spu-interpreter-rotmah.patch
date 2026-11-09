@@ -1,0 +1,11 @@
+diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -265,6 +265,7 @@
+     case SPU_mpyhha:DSTC = spu_mpyhha(A,B,T); break;  /* RRR */
+     /* rotate / shift extras */
+     case SPU_rothm:    DST = spu_rothm(A,B); break;
++    case SPU_rotmah:   DST = spu_rothma(A,B); break;
+     case SPU_rotqmbi:  DST = spu_rotqmbi(A,B); break;
+     case SPU_rotqmbii: DST = spu_rotqmbii(A,(int)I); break;
+     case SPU_rotqbybi: DST = spu_rotqbybi(A,B); break;

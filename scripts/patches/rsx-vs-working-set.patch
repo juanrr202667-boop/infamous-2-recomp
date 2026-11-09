@@ -1,0 +1,11 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -200,7 +200,7 @@
+     u64 identity;           /* unique occupancy, also keys guest-FP PSOs */
+     int pinned;            /* referenced by the currently recorded batch */
+ } VPVSEntry;
+-#define VP_VS_CACHE 64  /* initial allocation; grow when every slot is pinned */
++#define VP_VS_CACHE 128 /* initial allocation; grow when every slot is pinned */
+ 
+ /* Compiled guest-FP pipeline cache: decompiled VS (by cache slot) + decompiled
+  * PS (fragment ucode at fp_addr). */

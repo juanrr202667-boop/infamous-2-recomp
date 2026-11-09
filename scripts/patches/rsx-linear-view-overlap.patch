@@ -1,0 +1,150 @@
+--- /dev/null
++++ b/libs/video/rsx_linear_view.h
+@@ -0,0 +1,79 @@
++#ifndef RSX_LINEAR_VIEW_H
++#define RSX_LINEAR_VIEW_H
++
++#include <stdint.h>
++
++/* Geometry for views already established as linear by the caller. This does
++ * not classify RSX formats, tiling, DMA handles or GPU content ownership. */
++typedef struct rsx_linear_view {
++    uint64_t offset;
++    uint32_t width, height, pitch, bytes_per_pixel;
++    uint32_t format_id; /* Same ID must imply identical pixel representation. */
++    uint32_t location;  /* Explicit domain: 1 LOCAL, 2 MAIN; 0 is unknown. */
++} rsx_linear_view;
++
++typedef struct rsx_linear_copy_span {
++    uint32_t src_x, src_y, dst_x, dst_y, width;
++} rsx_linear_copy_span;
++
++typedef int (*rsx_linear_copy_emit)(void* user, const rsx_linear_copy_span* span);
++
++enum {
++    RSX_LINEAR_OK = 0,
++    RSX_LINEAR_BAD_VIEW = -1,
++    RSX_LINEAR_INCOMPATIBLE = -2,
++    RSX_LINEAR_EMIT_FAILED = -3
++};
++
++static inline int rsx_linear_view_valid(const rsx_linear_view* v)
++{
++    if (!v || !v->width || !v->height || !v->pitch || !v->bytes_per_pixel ||
++            !v->format_id || (v->location != 1 && v->location != 2)) return 0;
++    uint64_t row_bytes = (uint64_t)v->width * v->bytes_per_pixel;
++    if (row_bytes > v->pitch || v->pitch % v->bytes_per_pixel ||
++            v->offset % v->bytes_per_pixel) return 0;
++    uint64_t last_row = (uint64_t)(v->height - 1) * v->pitch;
++    return last_row <= UINT64_MAX - row_bytes &&
++           v->offset <= UINT64_MAX - (last_row + row_bytes);
++}
++
++/* Enumerate matching byte addresses, excluding row padding. Each emitted
++ * span has height 1. Different pitches may split one row across several rows
++ * of the other view. Complexity is O(src.height + dst.height).
++ *
++ * The callback only builds a plan: on failure the caller must discard partial
++ * output before submitting any GPU work. No rollback is attempted here. */
++static inline int rsx_linear_foreach_overlap(const rsx_linear_view* src,
++        const rsx_linear_view* dst, rsx_linear_copy_emit emit, void* user)
++{
++    if (!emit || !rsx_linear_view_valid(src) || !rsx_linear_view_valid(dst))
++        return RSX_LINEAR_BAD_VIEW;
++    if (src->location != dst->location) return RSX_LINEAR_OK;
++
++    uint64_t src_bytes = (uint64_t)src->width * src->bytes_per_pixel;
++    uint64_t dst_bytes = (uint64_t)dst->width * dst->bytes_per_pixel;
++    uint32_t sy = 0, dy = 0;
++    while (sy < src->height && dy < dst->height) {
++        uint64_t sb = src->offset + (uint64_t)sy * src->pitch;
++        uint64_t db = dst->offset + (uint64_t)dy * dst->pitch;
++        uint64_t se = sb + src_bytes, de = db + dst_bytes;
++        uint64_t begin = sb > db ? sb : db;
++        uint64_t end = se < de ? se : de;
++        if (begin < end) {
++            if (src->format_id != dst->format_id || src->bytes_per_pixel != dst->bytes_per_pixel)
++                return RSX_LINEAR_INCOMPATIBLE;
++            rsx_linear_copy_span span;
++            span.src_x = (uint32_t)((begin - sb) / src->bytes_per_pixel);
++            span.src_y = sy;
++            span.dst_x = (uint32_t)((begin - db) / dst->bytes_per_pixel);
++            span.dst_y = dy;
++            span.width = (uint32_t)((end - begin) / src->bytes_per_pixel);
++            if (!emit(user, &span)) return RSX_LINEAR_EMIT_FAILED;
++        }
++        if (se <= de) ++sy;
++        if (de <= se) ++dy;
++    }
++    return RSX_LINEAR_OK;
++}
++
++#endif
+--- /dev/null
++++ b/libs/video/rsx_linear_coherence.h
+@@ -0,0 +1,65 @@
++#ifndef RSX_LINEAR_COHERENCE_H
++#define RSX_LINEAR_COHERENCE_H
++
++#include "rsx_linear_view.h"
++
++typedef struct rsx_linear_version {
++    rsx_linear_view view;
++    /* Every pixel is current through this epoch. Promoting a partial write
++     * requires first reconciling the complete view, including retained lanes. */
++    uint64_t complete_at;
++} rsx_linear_version;
++
++typedef int (*rsx_linear_version_emit)(void* user, uint32_t src, uint32_t dst,
++                                     const rsx_linear_copy_span* span);
++
++typedef struct rsx_linear_version_relay {
++    rsx_linear_version_emit emit;
++    void* user;
++    uint32_t src, dst;
++} rsx_linear_version_relay;
++
++static inline int rsx_linear_version_emit_span(void* user, const rsx_linear_copy_span* span)
++{
++    rsx_linear_version_relay* relay = (rsx_linear_version_relay*)user;
++    return relay->emit(relay->user, relay->src, relay->dst, span);
++}
++
++/* Plan all newer intersecting snapshots in chronological order. Choosing only
++ * the newest view loses other regions. Including older snapshots can restore
++ * stale pixels. The caller retains every producer and commits complete_at only
++ * after accepting the entire plan; this function never mutates the catalog.
++ *
++ * Indices identify stable resource instances; the caller owns retention and
++ * fences. This is not an eviction algorithm or a classifier of RSX layouts. */
++static inline int rsx_linear_plan_materialize(const rsx_linear_version* views,
++        uint32_t count, uint32_t dst, uint64_t epoch,
++        rsx_linear_version_emit emit, void* user)
++{
++    if (!views || !emit || dst >= count) return RSX_LINEAR_BAD_VIEW;
++    for (uint32_t i = 0; i < count; ++i)
++        if (!rsx_linear_view_valid(&views[i].view) || views[i].complete_at > epoch)
++            return RSX_LINEAR_BAD_VIEW;
++
++    uint64_t after = views[dst].complete_at;
++    uint32_t previous = UINT32_MAX;
++    for (;;) {
++        uint32_t next = UINT32_MAX;
++        for (uint32_t i = 0; i < count; ++i) {
++            uint64_t at = views[i].complete_at;
++            if (i == dst || at <= views[dst].complete_at || at < after ||
++                    (at == after && (previous == UINT32_MAX || i <= previous))) continue;
++            if (next == UINT32_MAX || at < views[next].complete_at ||
++                    (at == views[next].complete_at && i < next)) next = i;
++        }
++        if (next == UINT32_MAX) return RSX_LINEAR_OK;
++        rsx_linear_version_relay relay = {emit, user, next, dst};
++        int result = rsx_linear_foreach_overlap(&views[next].view, &views[dst].view,
++                                               rsx_linear_version_emit_span, &relay);
++        if (result != RSX_LINEAR_OK) return result;
++        after = views[next].complete_at;
++        previous = next;
++    }
++}
++
++#endif

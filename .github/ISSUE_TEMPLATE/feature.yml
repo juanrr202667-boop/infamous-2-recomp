@@ -1,0 +1,55 @@
+name: Feature or infrastructure proposal
+description: A scoped improvement to reproducibility, diagnostics, testing, or collaboration
+title: "[Proposal]: "
+labels: ["help wanted", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals must preserve compilation accuracy and must not make the project
+        look more advanced than the evidence. No completion percentages or dates.
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Constraints
+      options:
+        - label: The proposal does not require distributing or uploading game material.
+          required: true
+        - label: The proposal does not hide a failing test or simulate gameplay.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Technical context
+      description: Relevant files, existing fixtures, and why current coverage is insufficient.
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed change
+      description: Keep it small enough for one reviewable pull request.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Objective checks, including tests and what remains untested.
+    validations:
+      required: true
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: Approximate difficulty
+      options:
+        - low
+        - medium
+        - high
+        - unknown
+    validations:
+      required: true

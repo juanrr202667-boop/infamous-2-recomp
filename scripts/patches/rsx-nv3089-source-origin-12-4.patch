@@ -1,0 +1,43 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -925,6 +925,12 @@ static int gcm_probe_begin(cellGcmTransferProbe* event, u32 src, u32 dst,
+     return 1;
+ }
+ 
++/* The NV3089 source origin (in_uv) is 12.4 fixed point. With a 20.12 step the
++ * origin must be shifted by 16 before the >>20 that recovers the pixel, not 8:
++ * an 8-bit shift made it 256x too small and every copy started at pixel 0,0 of
++ * the surface. */
++static inline u64 nv3089_origin(u32 p) { return (u64)p << 16; }
++
+ static void nv3089_blit(void)
+ {
+     u32 out_w = s_nv3089.out_sz & 0xFFFF, out_h = s_nv3089.out_sz >> 16;
+@@ -1006,10 +1012,10 @@ static void nv3089_blit(void)
+           const u8* sbase = vm_base + src2;
+           u8* dbase = vm_base + dst2;
+           for (u32 y = 0; y < out_h; y++) {
+-              u64 sv = ((u64)v0b << 8) + (u64)y * s_nv3089.dt_dy;
++              u64 sv = nv3089_origin(v0b) + (u64)y * s_nv3089.dt_dy;
+               const u8* srow = sbase + (u32)(sv >> 20) * in_pitch;
+               for (u32 x = 0; x < out_w; x++) {
+-                  u64 su = ((u64)u0b << 8) + (u64)x * s_nv3089.ds_dx;
++                  u64 su = nv3089_origin(u0b) + (u64)x * s_nv3089.ds_dx;
+                   memcpy(dbase + (u64)nv309e_swz(x, y, l2w, l2h) * 4,
+                          srow + (u32)(su >> 20) * 4, 4);
+               }
+@@ -1079,12 +1085,12 @@ static void nv3089_blit(void)
+     for (u32 y = 0; y < out_h; y++) {
+         u32 dy = out_y + y;
+         if (dy < cy0 || dy >= cy1) continue;
+-        u64 sv = ((u64)v0 << 8) + (u64)y * s_nv3089.dt_dy;         /* 20.12 */
++        u64 sv = nv3089_origin(v0) + (u64)y * s_nv3089.dt_dy;         /* 12.20 */
+         u32 sy = (u32)(sv >> 20);
+         for (u32 x = 0; x < out_w; x++) {
+             u32 dx = out_x + x;
+             if (dx < cx0 || dx >= cx1) continue;
+-            u64 su = ((u64)u0 << 8) + (u64)x * s_nv3089.ds_dx;
++            u64 su = nv3089_origin(u0) + (u64)x * s_nv3089.ds_dx;
+             u32 sx = (u32)(su >> 20);
+             u32 s = src + sy * in_pitch + sx * bpp;
+             u32 d = dst + dy * dst_pitch + dx * bpp;

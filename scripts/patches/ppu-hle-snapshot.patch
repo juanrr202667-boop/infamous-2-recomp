@@ -1,0 +1,87 @@
+diff --git "a/runtime/ppu/ppu_hle.cpp" "b/runtime/ppu/ppu_hle.cpp"
+index 3f6a291..2d52338 100644
+--- "a/runtime/ppu/ppu_hle.cpp"
++++ "b/runtime/ppu/ppu_hle.cpp"
+@@ -23,6 +23,9 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>       /* getenv, atoi (boot trace) */
++#include <chrono>
++#include <mutex>
++#include <thread>
+ 
+ /* Single flat NID -> handler table (all modules share it; resolution is by
+  * NID which is globally unique). Sized for the firmware import surface. */
+@@ -92,6 +95,52 @@ extern "C" const char* g_last_hle_name = "";
+ #define PS3_HLE_INFLIGHT_MAX 64
+ extern "C" const char* g_hle_inflight[PS3_HLE_INFLIGHT_MAX] = { nullptr };
+ 
++/* Independent, opt-in snapshot: never reads g_hle_inflight or guest memory.
++ * The lock protects the whole (active, NID, LR) record. It is never held while
++ * the handler runs. The saved record restores outer calls after nested HLE. */
++struct HleSnapshotValue { bool active = false; uint32_t nid = 0, lr = 0; };
++struct HleSnapshotSlot { std::mutex mutex; bool seen = false; HleSnapshotValue value; };
++struct HleSnapshot {
++    HleSnapshotSlot slots[PS3_HLE_INFLIGHT_MAX];
++    unsigned delay_ms, interval_ms;
++    void observe() {
++        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
++        for (unsigned sample = 0; sample < 1200; ++sample) {
++            for (unsigned t = 0; t < PS3_HLE_INFLIGHT_MAX; ++t) {
++                HleSnapshotValue v; bool seen;
++                { std::lock_guard<std::mutex> lock(slots[t].mutex);
++                  seen = slots[t].seen; v = slots[t].value; }
++                if (!seen) continue;
++                if (v.active) fprintf(stderr, "[hle-snapshot] tid=%u nid=%08X lr=%08X\n", t, v.nid, v.lr);
++                else fprintf(stderr, "[hle-snapshot] tid=%u idle\n", t);
++            }
++            fflush(stderr);
++            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
++        }
++    }
++};
++static HleSnapshot* hle_snapshot() {
++    static HleSnapshot* s = []() -> HleSnapshot* {
++        const char* e = getenv("PS3_HLE_SNAPSHOT_AFTER_MS");
++        if (!e || !*e) return nullptr;
++        char* end = nullptr;
++        unsigned long delay = strtoul(e, &end, 10);
++        if (*end || delay == 0 || delay > 3600000) return nullptr;
++        unsigned long interval = 1000;
++        const char* i = getenv("PS3_HLE_SNAPSHOT_INTERVAL_MS");
++        if (i && *i) {
++            interval = strtoul(i, &end, 10);
++            if (*end || interval < 10 || interval > 60000) return nullptr;
++        }
++        HleSnapshot* p = new HleSnapshot{};
++        p->delay_ms = (unsigned)delay; p->interval_ms = (unsigned)interval;
++        try { std::thread([p] { p->observe(); }).detach(); }
++        catch (...) { delete p; return nullptr; }
++        return p; /* observer and slots have process lifetime */
++    }();
++    return s;
++}
++
+ /* Real-PRX bridge: a loaded system PRX (libsre = cellSpurs/cellSync) may export
+  * this NID. If so, dispatch into the REAL recompiled Sony code (its OPD -> our
+  * indirect dispatcher -> the registered lifted libsre function) instead of the
+@@ -192,6 +241,19 @@ extern "C" void ppu_prof_stamp(void* ctx, unsigned lr);
+ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
+ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+ {
++    struct SnapshotGuard {
++        HleSnapshotSlot* slot = nullptr; HleSnapshotValue previous;
++        ~SnapshotGuard() { if (slot) { std::lock_guard<std::mutex> lock(slot->mutex); slot->value = previous; } }
++    } snapshot;
++    if (HleSnapshot* s = hle_snapshot()) {
++        if (ctx && ctx->thread_id < PS3_HLE_INFLIGHT_MAX) {
++            snapshot.slot = &s->slots[ctx->thread_id];
++            std::lock_guard<std::mutex> lock(snapshot.slot->mutex);
++            snapshot.previous = snapshot.slot->value;
++            snapshot.slot->value = {true, nid, (uint32_t)ctx->lr};
++            snapshot.slot->seen = true;
++        }
++    }
+     /* HLE_BT_EVERY=<n>: dump the calling thread's guest stack every nth HLE
+      * call it makes. WAITBT_EVERY only samples threads that are blocking on an
+      * event queue, which misses a thread that stops looping while it is BUSY --

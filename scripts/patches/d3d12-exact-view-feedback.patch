@@ -1,0 +1,394 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -44,6 +44,7 @@
+ #include "rsx_linear_catalog.h"
+ #include "rsx_linear_metadata.h"
+ #include "rsx_d3d12_linear_copy.h"
++#include "rsx_d3d12_feedback.h"
+ #include "rsx_d3d12_shader_resources.h"
+ 
+ /* We need these GUIDs — define them here to avoid uuid.lib dependency */
+@@ -362,6 +363,7 @@
+ 
+ static D3D12State s_d3d;
+ static rsx_linear_version s_off_rt_views[MAX_OFF_RTS];
++static rsx_d3d12_feedback_context s_feedback;
+ static rsx_linear_version s_pending_rt_views[MAX_OFF_RTS];
+ static u32 s_off_rt_count;
+ static u64 s_off_rt_epoch, s_pending_rt_epoch;
+@@ -3444,9 +3446,9 @@
+ {
+     if (!out) return;
+     if (draw < MAX_DRAWS) {
+-        fprintf(out, "      temporal_targets=[%d,%d,%d,%d] mask=0x%04X",
++        fprintf(out, "      temporal_targets=[%d,%d,%d,%d] mask=0x%04X feedback=0x%04X",
+                 s_rt_plan[draw].target[0], s_rt_plan[draw].target[1],
+-                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3], s_rt_plan[draw].texture_mask);
++                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3], s_rt_plan[draw].texture_mask, s_rt_plan[draw].feedback_mask);
+         for (int u = 0; u < RSX_MAX_TEXTURES; ++u) {
+             if (s_d3d.draws[draw].tex_rt[u] >= 0) {
+                 fprintf(out, " tex_rt[%d]=%d", u, s_d3d.draws[draw].tex_rt[u]);
+@@ -3528,6 +3530,54 @@
+     fflush(stderr); fflush(stdout);
+     /* No partial command list is submitted or reused after a failed plan. */
+     ExitProcess(2);
++}
++
++/* Reservation creates resources only. Recording the snapshot belongs to
++ * replay, after every overlapping producer has been materialized. */
++static void temporal_prepare_feedback(u32 draw)
++{
++    u32 visited = 0;
++    s_feedback.device = s_d3d.device;
++    s_feedback.command_list = s_d3d.cmd_list;
++    for (int unit = 0; unit < 16; ++unit) {
++        if (!(s_rt_plan[draw].feedback_mask & (1u << unit))) continue;
++        int slot = s_d3d.draws[draw].tex_rt[unit];
++        if (slot < 0 || (u32)slot >= s_off_rt_count || (u32)slot >= 32)
++            temporal_abort(draw, unit, "invalid feedback reservation identity");
++        if (visited & (1u << slot)) continue;
++        rsx_d3d12_linear_resource source = {s_d3d.off_rt[slot].res,
++            &s_d3d.off_rt[slot].st, s_off_rt_views[slot].view,
++            (DXGI_FORMAT)s_d3d.off_rt[slot].dxgi};
++        if (!rsx_d3d12_feedback_reserve(&s_feedback, (u32)slot, &source)) {
++            fprintf(stderr, "[FEEDBACK_FAILURE] stage=%s hr=0x%08lX view=%d\n",
++                s_feedback.last_error ? s_feedback.last_error : "unknown",
++                (unsigned long)s_feedback.last_hr, slot);
++            temporal_abort(draw, unit, "feedback reservation failed");
++        }
++        visited |= 1u << slot;
++    }
++}
++
++static void temporal_snapshot_feedback(u32 draw)
++{
++    u32 visited = 0;
++    for (int unit = 0; unit < 16; ++unit) {
++        if (!(s_rt_plan[draw].feedback_mask & (1u << unit))) continue;
++        int slot = s_d3d.draws[draw].tex_rt[unit];
++        if (slot < 0 || (u32)slot >= s_off_rt_count || (u32)slot >= 32)
++            temporal_abort(draw, unit, "invalid feedback snapshot identity");
++        if (visited & (1u << slot)) continue;
++        rsx_d3d12_linear_resource source = {s_d3d.off_rt[slot].res,
++            &s_d3d.off_rt[slot].st, s_pending_rt_views[slot].view,
++            (DXGI_FORMAT)s_d3d.off_rt[slot].dxgi};
++        if (!rsx_d3d12_feedback_snapshot(&s_feedback, (u32)slot, &source)) {
++            fprintf(stderr, "[FEEDBACK_FAILURE] stage=%s hr=0x%08lX view=%d\n",
++                s_feedback.last_error ? s_feedback.last_error : "unknown",
++                (unsigned long)s_feedback.last_hr, slot);
++            temporal_abort(draw, unit, "feedback snapshot failed; discard command list");
++        }
++        visited |= 1u << slot;
++    }
+ }
+ 
+ #include "rsx_d3d12_temporal_replay.h"
+@@ -4288,6 +4338,7 @@
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+         if (!temporal_prepare_textures(_d, draw_tex_mask))
+             temporal_abort(s_temporal_error_op, s_temporal_error_unit, s_temporal_error);
++        temporal_prepare_feedback(_d);
+ 
+         double _sv0 = perf_on() ? perf_now() : 0.0;
+         for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+@@ -4295,6 +4346,14 @@
+             if (!(draw_tex_mask & (1u << _u))) {
+                 srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
+                     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                continue;
++            }
++            if (s_rt_plan[_d].feedback_mask & (1u << _u)) {
++                int rt = dr->tex_rt[_u];
++                if (rt < 0 || (u32)rt >= 32 || !s_feedback.slots[rt].resource)
++                    temporal_abort(_d, _u, "missing feedback descriptor resource");
++                srv_write(wslot, s_feedback.slots[rt].resource,
++                    DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                 continue;
+             }
+             /* SCREEN_AS_TEX=1 is a diagnostic substitution. Matching dimensions
+@@ -6896,7 +6955,13 @@
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
++    UINT64 completed = s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence);
++    if (s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device) != S_OK ||
++            completed == UINT64_MAX || completed < s_d3d.fence_values[s_d3d.frame_index])
++        temporal_abort(UINT32_MAX, -1, "shutdown GPU batch did not complete");
+     temporal_release_completed_resources();
++    rsx_d3d12_feedback_release(&s_feedback);
++    memset(&s_feedback, 0, sizeof(s_feedback));
+     flush_deferred_releases();
+     vp_vs_cache_clear();
+ 
+diff --git a/libs/video/rsx_d3d12_temporal_plan.h b/libs/video/rsx_d3d12_temporal_plan.h
+--- a/libs/video/rsx_d3d12_temporal_plan.h
++++ b/libs/video/rsx_d3d12_temporal_plan.h
+@@ -10,6 +10,7 @@
+ static struct {
+     int target[4];
+     u32 texture_mask;
++    u32 feedback_mask;
+ } s_rt_plan[MAX_DRAWS];
+ static const char* s_temporal_error;
+ static u32 s_temporal_error_op;
+@@ -50,6 +51,7 @@
+         int member;
+         for (member = 0; member < 4; ++member) s_rt_plan[op].target[member] = -1;
+         s_rt_plan[op].texture_mask = 0;
++        s_rt_plan[op].feedback_mask = 0;
+     }
+     if (s_d3d.draw_count > MAX_DRAWS)
+         return temporal_plan_fail("draw count exceeds temporal plan capacity", 0, -1);
+@@ -117,6 +119,7 @@
+     dr = &s_d3d.draws[draw];
+     for (unit = 0; unit < 16; ++unit) dr->tex_rt[unit] = -1;
+     s_rt_plan[draw].texture_mask = mask;
++    s_rt_plan[draw].feedback_mask = 0;
+     if (mask & ~0xFFFFu)
+         return temporal_plan_fail("compiled shader texture mask is unknown or out of range", draw, -1);
+     if (s_off_rt_count > MAX_OFF_RTS)
+@@ -162,8 +165,11 @@
+             overlap = temporal_byte_overlap(&view, &s_off_rt_views[target].view);
+             if (overlap < 0)
+                 return temporal_plan_fail("invalid feedback view geometry", draw, unit);
+-            if (overlap)
+-                return temporal_plan_fail("texture/render-target feedback is unsupported", draw, unit);
++            if (overlap) {
++                if (slot != target)
++                    return temporal_plan_fail("partial texture/render-target feedback is unsupported", draw, unit);
++                s_rt_plan[draw].feedback_mask |= 1u << unit;
++            }
+         }
+         dr->tex_rt[unit] = slot;
+     }
+diff --git a/libs/video/rsx_d3d12_temporal_replay.h b/libs/video/rsx_d3d12_temporal_replay.h
+--- a/libs/video/rsx_d3d12_temporal_replay.h
++++ b/libs/video/rsx_d3d12_temporal_replay.h
+@@ -15,6 +15,8 @@
+         temporal_abort(draw, -1, "invalid pending temporal record");
+     if (s_rt_plan[draw].texture_mask & ~0xFFFFu)
+         temporal_abort(draw, -1, "unknown temporal shader mask");
++    if (s_rt_plan[draw].feedback_mask & ~s_rt_plan[draw].texture_mask)
++        temporal_abort(draw, -1, "feedback mask exceeds shader texture mask");
+     for (u32 i = 0; i < s_off_rt_count; ++i) {
+         if (!rsx_linear_view_valid(&s_pending_rt_views[i].view) ||
+                 s_pending_rt_views[i].complete_at > s_pending_rt_epoch ||
+@@ -32,6 +34,11 @@
+         int slot = s_d3d.draws[draw].tex_rt[unit];
+         if (slot < -1 || (slot >= 0 && (u32)slot >= s_off_rt_count))
+             temporal_abort(draw, unit, "invalid temporal source identity");
++        int destination = 0;
++        for (int member = 0; member < 4; ++member)
++            if (slot >= 0 && slot == s_rt_plan[draw].target[member]) destination = 1;
++        if (destination != !!(s_rt_plan[draw].feedback_mask & (1u << unit)))
++            temporal_abort(draw, unit, "feedback source does not match destination identity");
+     }
+ }
+ 
+@@ -86,10 +93,12 @@
+             temporal_materialize(s_d3d.draws[draw].tex_rt[unit], draw);
+     for (int member = 0; member < 4; ++member)
+         temporal_materialize(s_rt_plan[draw].target[member], draw);
++    temporal_snapshot_feedback(draw);
+     for (int unit = 0; unit < 16; ++unit) {
+         if (!(s_rt_plan[draw].texture_mask & (1u << unit))) continue;
+         int slot = s_d3d.draws[draw].tex_rt[unit];
+-        if (slot >= 0) off_rt_transition(slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++        if (slot >= 0 && !(s_rt_plan[draw].feedback_mask & (1u << unit)))
++            off_rt_transition(slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+     }
+     for (int member = 0; member < 4; ++member) {
+         int slot = s_rt_plan[draw].target[member];
+diff --git a/libs/video/rsx_d3d12_feedback.h b/libs/video/rsx_d3d12_feedback.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_d3d12_feedback.h
+@@ -0,0 +1,187 @@
++#ifndef RSX_D3D12_FEEDBACK_H
++#define RSX_D3D12_FEEDBACK_H
++
++#include "rsx_d3d12_linear_copy.h"
++
++/* Snapshot IDs follow the stable linear catalog. Only resource is owned;
++ * source is borrowed from that catalog and must remain alive. The caller
++ * waits for the GPU fence before releasing this pool or its source catalog. */
++typedef struct rsx_d3d12_feedback_slot {
++    ID3D12Resource* resource;
++    ID3D12Resource* source;
++    D3D12_RESOURCE_STATES state;
++    uint32_t width, height;
++    DXGI_FORMAT format;
++} rsx_d3d12_feedback_slot;
++
++typedef struct rsx_d3d12_feedback_context {
++    ID3D12Device* device;
++    ID3D12GraphicsCommandList* command_list;
++    rsx_d3d12_feedback_slot slots[32];
++    HRESULT last_hr;
++    const char* last_error;
++} rsx_d3d12_feedback_context;
++
++static inline int rsx_d3d12_feedback_fail(rsx_d3d12_feedback_context* context,
++        HRESULT hr, const char* stage)
++{
++    if (context) {
++        context->last_hr = hr;
++        context->last_error = stage;
++    }
++    return 0;
++}
++
++/* CopyResource copies the complete subresource. Refuse geometry whose actual
++ * allocation would require regions, mip/array handling, or an MSAA resolve. */
++static inline int rsx_d3d12_feedback_source_valid(
++        const rsx_d3d12_linear_resource* source)
++{
++    if (!source || !source->resource || !source->state ||
++            !rsx_linear_view_valid(&source->view) ||
++            source->view.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
++            source->view.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
++            source->view.format_id != 0x85 || source->view.bytes_per_pixel != 4 ||
++            source->format != DXGI_FORMAT_R8G8B8A8_UNORM) return 0;
++    D3D12_RESOURCE_DESC desc;
++    source->resource->lpVtbl->GetDesc(source->resource, &desc);
++    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
++           desc.Width == source->view.width && desc.Height == source->view.height &&
++           desc.DepthOrArraySize == 1 && desc.MipLevels == 1 &&
++           desc.Format == source->format && desc.SampleDesc.Count == 1 &&
++           desc.SampleDesc.Quality == 0;
++}
++
++static inline int rsx_d3d12_feedback_matches(const rsx_d3d12_feedback_slot* slot,
++        const rsx_d3d12_linear_resource* source)
++{
++    return slot->resource && slot->source == source->resource &&
++           slot->resource != source->resource && source->state != &slot->state &&
++           slot->width == source->view.width && slot->height == source->view.height &&
++           slot->format == source->format;
++}
++
++/* Reserve emits no commands. Occupied IDs cannot be replaced or evicted.
++ * Publish only a fully created resource; a failed allocation preserves every
++ * slot and leaves its HRESULT available to the caller's diagnostic. */
++static inline int rsx_d3d12_feedback_reserve(rsx_d3d12_feedback_context* context,
++        uint32_t id, const rsx_d3d12_linear_resource* source)
++{
++    if (!context || !context->device || id >= 32 ||
++            !rsx_d3d12_feedback_source_valid(source))
++        return rsx_d3d12_feedback_fail(context, E_INVALIDARG, "feedback.reserve.input");
++    rsx_d3d12_feedback_slot* slot = &context->slots[id];
++    if (source->state == &slot->state)
++        return rsx_d3d12_feedback_fail(context, E_INVALIDARG, "feedback.reserve.state");
++    if (slot->resource) {
++        if (!rsx_d3d12_feedback_matches(slot, source))
++            return rsx_d3d12_feedback_fail(context, E_INVALIDARG, "feedback.reserve.identity");
++        context->last_hr = S_OK;
++        context->last_error = NULL;
++        return 1;
++    }
++
++    D3D12_HEAP_PROPERTIES heap;
++    D3D12_RESOURCE_DESC desc;
++    memset(&heap, 0, sizeof(heap));
++    memset(&desc, 0, sizeof(desc));
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++    heap.CreationNodeMask = heap.VisibleNodeMask = 1;
++    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    desc.Width = source->view.width;
++    desc.Height = source->view.height;
++    desc.DepthOrArraySize = desc.MipLevels = 1;
++    desc.Format = source->format;
++    desc.SampleDesc.Count = 1;
++    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
++    ID3D12Resource* resource = NULL;
++#ifdef __cplusplus
++    REFIID iid = IID_ID3D12Resource;
++#else
++    REFIID iid = &IID_ID3D12Resource;
++#endif
++    HRESULT hr = context->device->lpVtbl->CreateCommittedResource(context->device,
++            &heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
++            NULL, iid, (void**)&resource);
++    if (FAILED(hr) || !resource) {
++        if (resource) resource->lpVtbl->Release(resource);
++        return rsx_d3d12_feedback_fail(context, FAILED(hr) ? hr : E_FAIL,
++                "feedback.reserve.create");
++    }
++    slot->resource = resource;
++    slot->source = source->resource;
++    slot->state = D3D12_RESOURCE_STATE_COPY_DEST;
++    slot->width = source->view.width;
++    slot->height = source->view.height;
++    slot->format = source->format;
++    context->last_hr = S_OK;
++    context->last_error = NULL;
++    return 1;
++}
++
++/* Refresh before every feedback draw, including consecutive draws of one ID.
++ * Validate before the first command. The source tracker remains COPY_SOURCE;
++ * replay restores destination/read states after all snapshots are refreshed.
++ * Discard the whole pending command list on any later recording failure. */
++static inline int rsx_d3d12_feedback_snapshot(rsx_d3d12_feedback_context* context,
++        uint32_t id, const rsx_d3d12_linear_resource* source)
++{
++    if (!context || !context->command_list || id >= 32 ||
++            !rsx_d3d12_feedback_source_valid(source))
++        return rsx_d3d12_feedback_fail(context, E_INVALIDARG, "feedback.snapshot.input");
++    rsx_d3d12_feedback_slot* slot = &context->slots[id];
++    if (!rsx_d3d12_feedback_matches(slot, source))
++        return rsx_d3d12_feedback_fail(context, E_INVALIDARG, "feedback.snapshot.identity");
++
++    D3D12_RESOURCE_BARRIER barriers[2];
++    UINT count = 0;
++    memset(barriers, 0, sizeof(barriers));
++    if (*source->state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++        D3D12_RESOURCE_BARRIER* barrier = &barriers[count++];
++        barrier->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        barrier->Transition.pResource = source->resource;
++        barrier->Transition.StateBefore = *source->state;
++        barrier->Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        barrier->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    }
++    if (slot->state != D3D12_RESOURCE_STATE_COPY_DEST) {
++        D3D12_RESOURCE_BARRIER* barrier = &barriers[count++];
++        barrier->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        barrier->Transition.pResource = slot->resource;
++        barrier->Transition.StateBefore = slot->state;
++        barrier->Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
++        barrier->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    }
++    if (count) context->command_list->lpVtbl->ResourceBarrier(context->command_list, count, barriers);
++    *source->state = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    slot->state = D3D12_RESOURCE_STATE_COPY_DEST;
++    context->command_list->lpVtbl->CopyResource(context->command_list,
++            slot->resource, source->resource);
++
++    memset(&barriers[0], 0, sizeof(barriers[0]));
++    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barriers[0].Transition.pResource = slot->resource;
++    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    context->command_list->lpVtbl->ResourceBarrier(context->command_list, 1, barriers);
++    slot->state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++    context->last_hr = S_OK;
++    context->last_error = NULL;
++    return 1;
++}
++
++/* The caller guarantees fence completion. Source identities are borrowed;
++ * keep context configuration and any failure diagnostic for reuse/reporting. */
++static inline void rsx_d3d12_feedback_release(rsx_d3d12_feedback_context* context)
++{
++    if (!context) return;
++    for (uint32_t id = 0; id < 32; ++id) {
++        if (context->slots[id].resource)
++            context->slots[id].resource->lpVtbl->Release(context->slots[id].resource);
++        memset(&context->slots[id], 0, sizeof(context->slots[id]));
++    }
++}
++
++#endif

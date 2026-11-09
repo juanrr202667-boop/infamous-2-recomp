@@ -1,0 +1,33 @@
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1516,7 +1516,29 @@
+  * spu_fn_registry.c before the registry was consolidated into this TU. */
+ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+ {
+-    return (spu_lifted_fn)spu_lookup(lsa, ctx ? ctx->image_id : 0);
++    if (!ctx) return (spu_lifted_fn)spu_lookup(lsa, 0);
++    /* Same ownership order as the dispatch below: code streamed over an LS
++     * range is the truth there, so the base image's stale lift at the same
++     * address must lose. Without this an interrupted WWS job -- resumed
++     * through the register-save stub the job manager runs -- did not match its
++     * own lift, so the rest of the job ran on the interpreter instead of
++     * rejoining translated code. */
++    for (unsigned slot = 0; slot < 4; ++slot) {
++        if (ctx->resident_code[slot].image_id && lsa >= ctx->resident_code[slot].lsa &&
++            lsa - ctx->resident_code[slot].lsa < ctx->resident_code[slot].size) {
++            spu_fn f = spu_lookup(lsa, ctx->resident_code[slot].image_id);
++            if (f) return (spu_lifted_fn)f;
++        }
++    }
++    if (ctx->resident_task) {
++        spu_fn f = spu_lookup(lsa, ctx->resident_task);
++        if (f) return (spu_lifted_fn)f;
++    }
++    if (ctx->resident_ovl) {
++        spu_fn f = spu_lookup(lsa, ctx->resident_ovl);
++        if (f) return (spu_lifted_fn)f;
++    }
++    return (spu_lifted_fn)spu_lookup(lsa, ctx->image_id);
+ }
+ 
+ /* ---- Swappable code overlays (see spu_context.resident_ovl) --------------

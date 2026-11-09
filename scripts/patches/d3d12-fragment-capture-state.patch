@@ -1,0 +1,140 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -376,6 +376,10 @@
+ static int s_temporal_pending;
+ static ID3D12PipelineState* s_temporal_pso[MAX_DRAWS];
+ static unsigned char s_temporal_guest_fp[MAX_DRAWS];
++static u32 s_temporal_fp_hash[MAX_DRAWS];
++static unsigned char s_temporal_fp_hash_valid[MAX_DRAWS];
++static u32 s_recorded_fp_hash[MAX_DRAWS];
++static u8 s_recorded_fp_prefix[MAX_DRAWS][32];
+ 
+ char g_rsx_title_base[128] = "ps3recomp";
+ static u32 s_dbg_last_draws = 0;
+@@ -1498,6 +1502,8 @@
+ }
+ 
+ static void write_temporal_views(FILE* out, u32 draw);
++
++static void write_capture_fragment_state(FILE* out, u32 ndraws);
+ 
+ static void write_surface_metadata(FILE* out, const D3D12DrawRecord* record)
+ {
+@@ -1604,6 +1610,7 @@
+                 shown++;
+             }
+         }
++        write_capture_fragment_state(mf, ndraws);
+         fclose(mf);
+     }
+ 
+@@ -2460,6 +2467,33 @@
+         char* rp = strstr(hlsl, "return r[0];");
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
+     }
++    /* Opt-in local source capture, independent of moving guest addresses.
++     * Dump the exact text passed to D3DCompile, with the pipeline code hash.
++     * Existing files are reused; cap distinct files to bound disk use. */
++    { const char* dump_dir = getenv("FP_DUMP_DIR");
++      static unsigned dumped = 0;
++      if (dump_dir && *dump_dir && dumped < 1024) {
++          u32 source_hash = 2166136261u;
++          for (const unsigned char* p = (const unsigned char*)hlsl; *p; ++p)
++              source_hash = (source_hash ^ *p) * 16777619u;
++          char path[512];
++          int length = snprintf(path, sizeof path, "%s/fp_%08X_%08X.hlsl",
++                                dump_dir, uhash, source_hash);
++          if (length > 0 && (size_t)length < sizeof path) {
++              CreateDirectoryA(dump_dir, NULL);
++              if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
++                  FILE* f = fopen(path, "w");
++                  if (f) {
++                      fprintf(f, "/* fp=%08X code_hash=%08X source_hash=%08X exp32=%d cube_mask=%X raw_prefix=",
++                              fp_addr, uhash, source_hash, exp32, cube_mask);
++                      for (u32 b = 0; b < 32; ++b) fprintf(f, "%02X", (unsigned)vm_base[off + b]);
++                      fprintf(f, " */\n%s", hlsl);
++                      fclose(f);
++                      ++dumped;
++                  }
++              }
++          }
++      } }
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+     HRESULT hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
+                             "main", "ps_5_0", 0, 0, &pb, &e);
+@@ -3324,6 +3358,11 @@
+             if (!vm_base || foff == 0xFFFFFFFFu ||
+                     rsx_d3d12_snapshot_fragment_constants(ts, vm_base + foff, 4096) < 0)
+                 temporal_abort(slot, -1, "fragment constants snapshot failed");
++            const char* capture_state = getenv("RSX_CAP_FP_STATE");
++            if (capture_state && !strcmp(capture_state, "1")) {
++                s_recorded_fp_hash[slot] = rsx_fp_code_hash(vm_base + foff, 4096);
++                memcpy(s_recorded_fp_prefix[slot], vm_base + foff, 32);
++            }
+             /* FPK_DBG=1: the fragment constants as the shader will see them.
+              * A program whose only output is fp_k[0].xxxx renders black if
+              * those constants never arrive, which looks identical from the
+@@ -3551,6 +3590,35 @@
+     }
+ }
+ 
++static void write_capture_fragment_state(FILE* out, u32 ndraws)
++{
++    const char* enabled = getenv("RSX_CAP_FP_STATE");
++    if (!out || !enabled || strcmp(enabled, "1")) return;
++    fprintf(out, "--- fp state (completed display draws) ---\n");
++    if (!s_d3d.vp_fpcb_mapped) {
++        fprintf(out, "fragment constant bank unavailable\n");
++        return;
++    }
++    const u32 par = (u32)(s_d3d.vp_parity ^ 1);
++    for (u32 d = 0; d < ndraws && d < MAX_DRAWS; ++d) {
++        const D3D12DrawRecord* r = &s_d3d.draws[d];
++        if (r->is_clear || !r->fp_addr || !s_rt_plan[d].display_target) continue;
++        const float* bank = (const float*)((const char*)s_d3d.vp_fpcb_mapped
++            + ((u64)par * MAX_DRAWS + d) * VP_FPCB_STRIDE);
++        fprintf(out, "op%03u fp=%08X exp32=%d hash=%08X hash_valid=%u parity=%u record_hash=%08X\n",
++                d, r->fp_addr, r->fp_exp32, s_temporal_fp_hash[d],
++                (unsigned)s_temporal_fp_hash_valid[d], par, s_recorded_fp_hash[d]);
++        fprintf(out, "  record_prefix=");
++        for (u32 b = 0; b < 32; ++b) fprintf(out, "%02X", (unsigned)s_recorded_fp_prefix[d][b]);
++        fprintf(out, "\n");
++        for (u32 k = 0; k < RSX_D3D12_FP_CONSTANT_COUNT; ++k) {
++            const float* v = bank + RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + k * 4;
++            fprintf(out, "  k[%u] = %.9g %.9g %.9g %.9g\n", k,
++                    (double)v[0], (double)v[1], (double)v[2], (double)v[3]);
++        }
++    }
++}
++
+ static D3D12_CPU_DESCRIPTOR_HANDLE off_rt_rtv(int slot)
+ {
+     D3D12_CPU_DESCRIPTOR_HANDLE rh;
+@@ -3762,6 +3830,8 @@
+ 
+ static ID3D12PipelineState* temporal_select_pipeline(u32 draw, const D3D12DrawRecord* dr, u32* mask)
+ {
++    s_temporal_fp_hash[draw] = 0;
++    s_temporal_fp_hash_valid[draw] = 0;
+     ID3D12PipelineState* pipeline = dr->fp_addr ? vp_get_fp_pso(dr->vs_idx,
+         dr->fp_addr, dr->blend_key, dr_num_rts(dr),
+         dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
+@@ -3770,6 +3840,18 @@
+         for (u32 i = 0; i < s_d3d.vp_fp_n; ++i)
+             if (s_d3d.vp_fp[i].pso == pipeline) {
+                 *mask = s_d3d.vp_fp[i].texture_mask;
++                s_temporal_fp_hash[draw] = s_d3d.vp_fp[i].ucode_hash;
++                s_temporal_fp_hash_valid[draw] = 1;
++                const char* capture_state = getenv("RSX_CAP_FP_STATE");
++                if (capture_state && !strcmp(capture_state, "1") &&
++                        s_recorded_fp_hash[draw] != s_temporal_fp_hash[draw]) {
++                    static unsigned reported = 0;
++                    if (reported++ < 32) {
++                        fprintf(stderr, "[FP_CODE_CHANGED] frame=%llu draw=%u fp=%08X record_hash=%08X pipeline_hash=%08X\n",
++                                (unsigned long long)s_d3d.frame_count, draw, dr->fp_addr,
++                                s_recorded_fp_hash[draw], s_temporal_fp_hash[draw]);
++                    }
++                }
+                 return pipeline;
+             }
+         *mask = UINT32_MAX;

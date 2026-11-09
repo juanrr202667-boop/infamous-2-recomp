@@ -1,0 +1,478 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -37,6 +37,7 @@
+ #include <dxgi1_4.h>
+ #include <dxgi1_6.h>
+ #include <d3dcompiler.h>
++#include "rsx_d3d12_guest_pipeline.h"
+ 
+ /* We need these GUIDs — define them here to avoid uuid.lib dependency */
+ #include <initguid.h>
+@@ -64,9 +65,9 @@
+  * own texScale/offset uniforms, so one per-frame snapshot ran every pass
+  * with the LAST pass's constants. */
+ #define VP_CB_STRIDE      8448
+-/* b1 per-draw FP slot: rsx_texscale[4] + rsx_alphatest + fp_k[64]
+- * = 69 float4 = 1104 B, rounded to D3D12's 256-byte CBV alignment. */
+-#define VP_FPCB_STRIDE    1280
++/* Legacy b1 per-draw slot: 16 scales, alpha and 64 constants = 1296 B.
++ * Keep its layout coherent even though unbuffered guest FPs use literals. */
++#define VP_FPCB_STRIDE    RSX_D3D12_FPCB_STRIDE
+ #define VERTEX_STRIDE       36  /* bytes per host vertex: pos3 + col4 + uv2 */
+ 
+ typedef struct {
+@@ -88,7 +89,7 @@
+     u32 cmask;          /* D3D write mask from SET_COLOR_MASK at draw time
+                          * (wave's sim passes write single lanes of the height
+                          * maps; ignoring the mask stomped persistent state) */
+-    /* Per-unit textures (t0-t3): decompiled FPs sample up to 4 units
++    /* Per-unit textures (t0-t15): decompiled FPs sample up to 16 units
+      * (demosaic's interpolation passes read 3). Captured at draw time. */
+     struct {
+         u32 off;        /* resolved vm offset (guest upload source), 0 = none */
+@@ -103,8 +104,8 @@
+                          * one as 2D is what makes an environment-mapped chrome
+                          * surface come out with black patches and banding. */
+         int set;
+-    } tex[4];
+-    int tex_rt[4];      /* pre-pass: OffRT index sampled by unit, -1 = none */
++    } tex[RSX_MAX_TEXTURES];
++    int tex_rt[RSX_MAX_TEXTURES];      /* pre-pass: OffRT index sampled by unit, -1 = none */
+     int tex_slot;       /* legacy single-slot path (atlas); -1 = none */
+     int vs_idx;         /* VPVSEntry slot for this draw's vertex program (-1 = primary) */
+     int blend;          /* guest blend enable at draw time */
+@@ -145,17 +146,15 @@
+     D3D12_RESOURCE_STATES st;          /* tracked resource state */
+     int                   used;        /* referenced this frame */
+ } OffRT;
+-#define MAX_OFF_RTS  16  /* demosaic double-buffers its 6-surface pass chain */
+-#define RT_SRV_BASE  5   /* SRV heap slots 5..20 hold offscreen-RT SRVs */
+-/* Per-draw SRV windows: each VP draw gets 4 consecutive descriptors (t0-t3)
+- * so multi-unit fragment programs see all their textures (demosaic's
+- * interpolation passes sample 3 units). */
+-#define DRAW_SRV_BASE 32
+-#define SRV_HEAP_SIZE (DRAW_SRV_BASE + MAX_DRAWS * 4)
++#define MAX_OFF_RTS  RSX_D3D12_MAX_OFF_RTS  /* demosaic double-buffers its 6-surface pass chain */
++#define RT_SRV_BASE  RSX_D3D12_RT_SRV_BASE
++/* Each guest VP draw owns a complete t0-t15 descriptor table. */
++#define DRAW_SRV_BASE RSX_D3D12_DRAW_SRV_BASE
++#define SRV_HEAP_SIZE (DRAW_SRV_BASE + MAX_DRAWS * RSX_MAX_TEXTURES)
+ 
+ /* Per-frame VP texture slot: a guest texture uploaded for this frame's VP
+  * draws (re-uploaded every frame -- gcm/cube's plasma animates in guest
+- * memory). SRV lives at heap index 1+slot. */
++ * memory). SRV lives in the cache window, separate from RT and draw descriptors. */
+ typedef struct {
+     ID3D12Resource* res;
+     ID3D12Resource* up;
+@@ -173,7 +172,7 @@
+  * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
+  * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
+  * object, which is indistinguishable from a missing texture upload. */
+-#define VP_TEX_SLOTS 96
++#define VP_TEX_SLOTS RSX_D3D12_VP_TEX_SLOTS
+ 
+ /* Decompiled-VS cache: one entry per distinct vertex-program ucode seen at
+  * draw time (hashed). Apps switch VPs between draws (gcm/cube: its MVP cube VP
+@@ -310,8 +309,8 @@
+     VPFPEntry             vp_fp[VP_FP_CACHE];   /* guest-FP PSO cache            */
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+-    /* VP path: latest texture bound per unit (t0-t3). */
+-    struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set; } cur_texs[4];
++    /* VP path: latest texture bound per unit (t0-t15). */
++    struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
+ 
+     /* Render-to-texture: offscreen RT pool + their RTV heap. */
+     OffRT                 off_rt[MAX_OFF_RTS];
+@@ -1033,10 +1032,10 @@
+         }
+ 
+         /* SRV descriptor heap (shader-visible). Layout: slot 0 = legacy atlas
+-         * (dbgfont / textured 2D path), slots 1-4 = per-draw VP textures,
+-         * 5-20 = offscreen render targets (render-to-texture), rest spare.
+-         * All slots start as null SRVs so any 4-wide table window (the
+-         * root signature binds t0-t3) is valid on tier-1 hardware. */
++         * (dbgfont / textured 2D path), slots 1-96 = VP texture cache,
++         * 97-112 = offscreen render targets, draw tables start at 128.
++         * All slots start as null SRVs so every 16-wide guest draw table
++         * is fully initialized, including on tier-1 hardware. */
+         {
+             D3D12_DESCRIPTOR_HEAP_DESC hd = {0};
+             hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+@@ -1113,53 +1112,11 @@
+      * game uploads its VP microcode (render_frame).
+      * ---------------------------------------------------------------*/
+     {
+-        /* 4-descriptor SRV table (t0-t3) so decompiled fragment programs can
+-         * sample up to 4 texture units; the hardcoded atlas/colour PSs use only
+-         * t0 and are unaffected. Matching 4 static samplers s0-s3. */
+-        D3D12_DESCRIPTOR_RANGE srv_range = {0};
+-        srv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+-        srv_range.NumDescriptors = 4;
+-        srv_range.BaseShaderRegister = 0;
+-        srv_range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+-
+-        D3D12_ROOT_PARAMETER rp[3] = {0};
+-        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b0 = vp_c bank */
+-        rp[0].Descriptor.ShaderRegister = 0;
+-        rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+-        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+-        rp[1].DescriptorTable.NumDescriptorRanges = 1;
+-        rp[1].DescriptorTable.pDescriptorRanges = &srv_range;
+-        rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+-        rp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;   /* b1 = FP texscale */
+-        rp[2].Descriptor.ShaderRegister = 1;
+-        rp[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+-
+-        D3D12_STATIC_SAMPLER_DESC samp[4] = {0};
+-        for (int _s = 0; _s < 4; _s++) {
+-            samp[_s].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+-            samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+-            samp[_s].ShaderRegister = (UINT)_s;
+-            samp[_s].MaxLOD = D3D12_FLOAT32_MAX;
+-            samp[_s].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+-        }
+-        /* s0 keeps point/clamp: the dbgfont atlas PS samples glyph cells and
+-         * linear filtering bleeds neighbouring glyphs. */
+-        samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+-        samp[0].AddressU = samp[0].AddressV = samp[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+-
+-        D3D12_ROOT_SIGNATURE_DESC rd = {0};
+-        rd.NumParameters = 3; rd.pParameters = rp;
+-        rd.NumStaticSamplers = 4; rd.pStaticSamplers = samp;
+-        rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+-
+-        ID3DBlob* sig = NULL; ID3DBlob* err = NULL;
+-        hr = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+-        if (SUCCEEDED(hr)) {
+-            s_d3d.device->lpVtbl->CreateRootSignature(s_d3d.device, 0,
+-                sig->lpVtbl->GetBufferPointer(sig), sig->lpVtbl->GetBufferSize(sig),
+-                &IID_ID3D12RootSignature, (void**)&s_d3d.vp_root_sig);
+-            sig->lpVtbl->Release(sig);
+-        } else if (err) { printf("[D3D12] VP root sig: %s\n", (const char*)err->lpVtbl->GetBufferPointer(err)); err->lpVtbl->Release(err); }
++        ID3DBlob* err = NULL;
++        hr = rsx_d3d12_create_guest_root_signature(s_d3d.device, &s_d3d.vp_root_sig, &err);
++        if (FAILED(hr) && err)
++            printf("[D3D12] VP root sig: %s\n", (const char*)err->lpVtbl->GetBufferPointer(err));
++        if (err) err->lpVtbl->Release(err);
+ 
+         /* raw float4 vertex buffer + constant bank (both UPLOAD, persistently mapped) */
+         D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+@@ -1504,7 +1461,7 @@
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+                         r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
+-                for (int u = 0; u < 4; u++)
++                for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
+                                 r->tex[u].off, r->tex[u].fmt,
+@@ -1956,7 +1913,7 @@
+     if (en < 0) { const char* e = getenv("RSX_CUBE_TEX"); en = e ? atoi(e) : 1; }
+     if (!en) return 0;
+     u32 m = 0;
+-    for (int u = 0; u < 4; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
++    for (int u = 0; u < RSX_MAX_TEXTURES; u++) if (dr->tex[u].set && dr->tex[u].cube) m |= 1u << u;
+     return m;
+ }
+ 
+@@ -2064,7 +2021,7 @@
+     /* The draw captures SHADER_CONTROL's export-width bit. Preserve it even
+      * when the program also writes the other register file as temporary data. */
+     u32 fp_control = exp32 ? 0x40u : 0u;
+-    int n = rsx_fp_decompile(vm_base + off, 4096, fp_control, hlsl, sizeof(hlsl));
++    int n = rsx_fp_decompile_ex(vm_base + off, 4096, fp_control, cube_mask, hlsl, sizeof(hlsl));
+     if (n <= 0) { static int _e=0; if(_e++<16) printf("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
+     /* FP_LIST=1: every program the title actually compiles, with its size. A
+      * fragment program that hangs the GPU shows up here as an implausible
+@@ -2166,7 +2123,7 @@
+      * and no texel-scale, and the emitted coordinate always ends in the fixed
+      * tail ".xy * rsx_texscale[N].xy", so both edits are exact replacements. */
+     if (cube_mask) {
+-        for (int _u = 0; _u < 4; _u++) {
++        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+             if (!(cube_mask & (1u << _u))) continue;
+             char f1[64], r1[64], f2[64], r2[64];
+             snprintf(f1, sizeof f1, "Texture2D    rsx_tex%d", _u);
+@@ -2223,7 +2180,7 @@
+     if (getenv("FP_TEX") && (!getenv("FP_TEX_FP") ||
+         (u32)strtoul(getenv("FP_TEX_FP"), NULL, 16) == fp_addr)) {
+         int _un = atoi(getenv("FP_TEX"));
+-        if (_un < 0 || _un > 3) _un = 0;
++        if (_un < 0 || _un >= RSX_MAX_TEXTURES) _un = 0;
+         char* rp = strstr(hlsl, "_po.c0 = ");
+         if (rp) {
+             char* semi = strchr(rp, ';');
+@@ -3023,7 +2980,7 @@
+     sv.Texture2D.MipLevels = 1;
+     D3D12_CPU_DESCRIPTOR_HANDLE sh;
+     s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &sh);
+-    sh.ptr += (u64)(1 + slot) * s_d3d.srv_inc;
++    sh.ptr += (u64)(RSX_D3D12_VP_TEX_SRV_BASE + slot) * s_d3d.srv_inc;
+     if (cube) {
+         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+         sv.TextureCube.MipLevels = 1;
+@@ -3063,7 +3020,7 @@
+     if (s_d3d.vp_fpcb_mapped) {
+         float* ts = (float*)((char*)s_d3d.vp_fpcb_mapped
+             + ((u64)s_d3d.vp_parity * MAX_DRAWS + slot) * VP_FPCB_STRIDE);
+-        for (int _u = 0; _u < 4; _u++) {
++        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+             float sx = 1.0f, sy = 1.0f;
+             if (dr && dr->tex[_u].set && (dr->tex[_u].fmt & 0x40) &&
+                 dr->tex[_u].w && dr->tex[_u].h) {
+@@ -3072,7 +3029,7 @@
+             }
+             ts[_u*4+0] = sx; ts[_u*4+1] = sy; ts[_u*4+2] = 0.0f; ts[_u*4+3] = 0.0f;
+         }
+-        /* rsx_alphatest (b1[4]): x=enable, y=ref/255, z=func-0x200. D3D12
++        /* rsx_alphatest (b1[RSX_MAX_TEXTURES]): x=enable, y=ref/255, z=func-0x200. D3D12
+          * has no fixed alpha test; guest FPs discard on it dynamically
+          * (wave's colour wheel is a disc via alpha test -- without it the
+          * palette drew as an opaque square). */
+@@ -3081,12 +3038,12 @@
+               if (((dr->alpha_ctl >> 16) & 1u) && _at++ < 4)
+                   printf("[ALPHATEST] enable func=%u ref=%u\n",
+                          (dr->alpha_ctl >> 8) & 0xFFu, dr->alpha_ctl & 0xFFu); }
+-            ts[16] = (float)((dr->alpha_ctl >> 16) & 1u);
+-            ts[17] = (float)(dr->alpha_ctl & 0xFFu) / 255.0f;
+-            ts[18] = (float)((dr->alpha_ctl >> 8) & 0x07u);
+-            ts[19] = 0.0f;
++            ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET] = (float)((dr->alpha_ctl >> 16) & 1u);
++            ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 1] = (float)(dr->alpha_ctl & 0xFFu) / 255.0f;
++            ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 2] = (float)((dr->alpha_ctl >> 8) & 0x07u);
++            ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 3] = 0.0f;
+         } else {
+-            ts[16] = 0.0f; ts[17] = 0.0f; ts[18] = 7.0f; ts[19] = 0.0f;
++            ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET] = 0.0f; ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 1] = 0.0f; ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 2] = 7.0f; ts[RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 3] = 0.0f;
+         }
+ 
+         /* fp_k[]: the program's inline fragment constants, re-read from the
+@@ -3100,7 +3057,7 @@
+             u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
+                                              dr->fp_addr & ~0x3u);
+             if (vm_base && foff != 0xFFFFFFFFu)
+-                rsx_fp_extract_consts(vm_base + foff, 4096, &ts[20], 64);   /* fp_k[64] */
++                rsx_fp_extract_consts(vm_base + foff, 4096, &ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET], RSX_D3D12_FP_CONSTANT_COUNT);   /* fp_k[64] */
+             /* FPK_DBG=1: the fragment constants as the shader will see them.
+              * A program whose only output is fp_k[0].xxxx renders black if
+              * those constants never arrive, which looks identical from the
+@@ -3111,8 +3068,8 @@
+                   fprintf(stderr, "[FPK] tex0=0x%08X fp=0x%08X k0=(%g %g %g %g)"
+                                   " k1=(%g %g %g %g)%c",
+                           dr->tex[0].raw, dr->fp_addr,
+-                          ts[20], ts[21], ts[22], ts[23],
+-                          ts[24], ts[25], ts[26], ts[27], 10);
++                          ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 1], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 2], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 3],
++                          ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 4], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 5], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 6], ts[RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET + 7], 10);
+                   const u32 raw = dr->fp_addr & ~0x3u;
+                   const u32 ea_main  = cellGcmResolveLocated(0, raw);
+                   const u32 ea_local = cellGcmResolveLocated(1, raw);
+@@ -4087,7 +4044,7 @@
+         { static int ed = -1;
+           if (ed < 0) { const char* e = getenv("EMPTYTEX"); ed = e ? atoi(e) : 0; }
+           extern uint8_t* vm_base;
+-          if (ed && vm_base) for (int _u = 0; _u < 4; _u++) {
++          if (ed && vm_base) for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+               if (!dr->tex[_u].set || !dr->tex[_u].off) continue;
+               u32 nz = 0, sz = dr->tex[_u].w * dr->tex[_u].h * 4u;
+               for (u32 i2 = 0; i2 < sz && i2 < 0x20000u; i2 += 997)
+@@ -4130,7 +4087,7 @@
+           } }
+         { static int sd = -1;
+           if (sd < 0) { const char* e = getenv("SCREENTEX"); sd = e ? atoi(e) : 0; }
+-          if (sd) for (int _u = 0; _u < 4; _u++)
++          if (sd) for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++)
+               if (dr->tex[_u].set && dr->tex[_u].w == s_d3d.width &&
+                   dr->tex[_u].h == s_d3d.height) {
+                   static u32 seen[16]; static int ns = 0; int known = 0;
+@@ -4142,12 +4099,12 @@
+                               dr->tex[_u].fmt, dr->fp_addr, dr->vertex_count,
+                               dr->vp_x, dr->vp_y, dr->vp_w, dr->vp_h, 10); }
+               } }
+-        /* Fill this draw's t0-t3 SRV window (DRAW_SRV_BASE + d*4): each unit
++        /* Fill this draw's t0-t15 SRV window: each unit
+          * resolves to an offscreen RT (sampled directly), an uploaded guest
+          * texture, or a null SRV. */
+         double _sv0 = perf_on() ? perf_now() : 0.0;
+-        for (int _u = 0; _u < 4; _u++) {
+-            u32 wslot = DRAW_SRV_BASE + _d * 4 + (u32)_u;
++        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
++            u32 wslot = rsx_d3d12_guest_draw_srv_index(_d, (u32)_u);
+             dr->tex_rt[_u] = -1;
+             /* SCREEN_AS_TEX=1 is a diagnostic substitution. Matching dimensions
+              * alone do not identify the producer of a guest texture (a Bink
+@@ -4596,17 +4553,17 @@
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
+                     s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &dsc);
+                 }
+-                /* Per-draw textures: bind this draw's t0-t3 SRV window.
++                /* Per-draw textures: bind this draw's t0-t15 SRV window.
+                  * Any sampled offscreen RT transitions to PSR first (never
+                  * one of the currently-bound colour targets). */
+-                for (int _u = 0; _u < 4; _u++) {
++                for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+                     int rt = dr->tex_rt[_u];
+                     if (rt >= 0 && rt != cur_rt &&
+                         rt != cur_m[0] && rt != cur_m[1] && rt != cur_m[2])
+                         off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                 }
+                 D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
+-                gh.ptr += (u64)(DRAW_SRV_BASE + d * 4) * s_d3d.srv_inc;
++                gh.ptr += (u64)rsx_d3d12_guest_draw_srv_index(d, 0) * s_d3d.srv_inc;
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+                 /* Per-draw constants: this draw's vp_cb + FP texscale slots. */
+                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
+@@ -6084,7 +6041,7 @@
+                     dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                                   | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                                   | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
+-                for (int _u = 0; _u < 4; _u++) {
++                for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+                     dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+                     dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+                     dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+@@ -6206,7 +6163,7 @@
+                 dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                               | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                               | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
+-            for (int _u = 0; _u < 4; _u++) {
++            for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+                 dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+                 dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+                 dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+@@ -6349,7 +6306,7 @@
+             dr->alpha_ctl = ((s_d3d.current_rsx_state->alpha_test_enable ? 1u : 0u) << 16)
+                           | ((s_d3d.current_rsx_state->alpha_func & 0xFFu) << 8)
+                           | (s_d3d.current_rsx_state->alpha_ref & 0xFFu);
+-        for (int _u = 0; _u < 4; _u++) {
++        for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+             dr->tex[_u].off = s_d3d.cur_texs[_u].off;
+             dr->tex[_u].raw = s_d3d.cur_texs[_u].raw;
+             dr->tex[_u].w   = s_d3d.cur_texs[_u].w;
+@@ -6386,6 +6343,7 @@
+ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+ {
+     (void)ud;
++    if (unit >= RSX_MAX_TEXTURES) return;
+     extern uint8_t* vm_base;
+     extern u32 cellGcmResolveOffset(u32);
+ 
+@@ -6454,7 +6412,7 @@
+     /* VP path: record the latest bound texture (any supported format) so draws
+      * can carry it per-draw. Location bits (format[1:0]): 1 = LOCAL, 2 = MAIN. */
+     extern u32 cellGcmResolveLocated(int local, u32 offset);
+-    if (unit < 4 &&
++    if (unit < RSX_MAX_TEXTURES &&
+         (base_fmt == 0x81 /* B8 */ || base_fmt == 0x85 /* A8R8G8B8 */ ||
+          base_fmt == 0x8B /* G8B8: LBP's font atlas */ ||
+          (base_fmt >= 0x86 && base_fmt <= 0x88) /* DXT1/23/45 */ ||
+@@ -6515,6 +6473,8 @@
+                         (tex->format>>16)&0xFFFFu, (tex->format&4)?1:0, offset, 10); } }
+         s_d3d.cur_texs[unit].set = 1;
+     }
++    /* Higher guest units do not change the legacy single-atlas binding. */
++    if (unit >= 4) return;
+     if (base_fmt == 0x81 /* B8 */) {
+         s_d3d.tex_src_offset = cellGcmResolveLocated((tex->format & 3) == 1, offset);
+         if (s_d3d.tex_w != width || s_d3d.tex_h != height) {
+diff --git a/libs/video/rsx_d3d12_guest_pipeline.h b/libs/video/rsx_d3d12_guest_pipeline.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_d3d12_guest_pipeline.h
+@@ -0,0 +1,93 @@
++#ifndef RSX_D3D12_GUEST_PIPELINE_H
++#define RSX_D3D12_GUEST_PIPELINE_H
++
++#include <d3d12.h>
++#include <d3dcompiler.h>
++#include <string.h>
++#include "rsx_commands.h"
++
++/* Keep cache SRVs, RT SRVs and per-draw tables in disjoint heap windows. */
++#define RSX_D3D12_GUEST_TEXTURE_UNITS RSX_MAX_TEXTURES
++#define RSX_D3D12_DRAW_SRV_BASE 128
++#define RSX_D3D12_VP_TEX_SLOTS 96
++#define RSX_D3D12_VP_TEX_SRV_BASE 1
++#define RSX_D3D12_MAX_OFF_RTS 16
++#define RSX_D3D12_RT_SRV_BASE (RSX_D3D12_VP_TEX_SRV_BASE + RSX_D3D12_VP_TEX_SLOTS)
++
++/* The legacy FP buffer keeps one scale per texture, then alpha and constants.
++ * The current unbuffered decompiler does not consume this buffer. */
++#define RSX_D3D12_FP_CONSTANT_COUNT 64
++#define RSX_D3D12_FP_ALPHA_FLOAT_OFFSET (RSX_D3D12_GUEST_TEXTURE_UNITS * 4)
++#define RSX_D3D12_FP_CONSTANT_FLOAT_OFFSET (RSX_D3D12_FP_ALPHA_FLOAT_OFFSET + 4)
++#define RSX_D3D12_FPCB_STRIDE (((RSX_D3D12_GUEST_TEXTURE_UNITS + 1 + RSX_D3D12_FP_CONSTANT_COUNT) * 16 + 255) & ~255)
++
++static inline UINT rsx_d3d12_guest_draw_srv_index(UINT draw, UINT unit)
++{
++    return RSX_D3D12_DRAW_SRV_BASE + draw * RSX_D3D12_GUEST_TEXTURE_UNITS + unit;
++}
++
++/* This is the VP/guest fragment-program signature. The legacy atlas uses its
++ * separate one-texture signature. Serialization consumes all local descriptors
++ * before this function returns. */
++static inline HRESULT rsx_d3d12_create_guest_root_signature(
++    ID3D12Device* device, ID3D12RootSignature** root, ID3DBlob** errors)
++{
++    D3D12_DESCRIPTOR_RANGE range;
++    D3D12_ROOT_PARAMETER parameters[3];
++    D3D12_STATIC_SAMPLER_DESC samplers[RSX_D3D12_GUEST_TEXTURE_UNITS];
++    D3D12_ROOT_SIGNATURE_DESC description;
++    ID3DBlob* signature = NULL;
++    ID3DBlob* local_errors = NULL;
++    HRESULT result;
++    memset(&range, 0, sizeof(range));
++    memset(parameters, 0, sizeof(parameters));
++    memset(samplers, 0, sizeof(samplers));
++    memset(&description, 0, sizeof(description));
++    *root = NULL;
++    if (errors) *errors = NULL;
++    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
++    range.NumDescriptors = RSX_D3D12_GUEST_TEXTURE_UNITS;
++    range.BaseShaderRegister = 0;
++    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
++    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
++    parameters[0].Descriptor.ShaderRegister = 0;
++    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
++    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++    parameters[1].DescriptorTable.NumDescriptorRanges = 1;
++    parameters[1].DescriptorTable.pDescriptorRanges = &range;
++    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
++    parameters[2].Descriptor.ShaderRegister = 1;
++    parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    for (UINT unit = 0; unit < RSX_D3D12_GUEST_TEXTURE_UNITS; unit++) {
++        samplers[unit].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
++        samplers[unit].AddressU = samplers[unit].AddressV = samplers[unit].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
++        samplers[unit].ShaderRegister = unit;
++        samplers[unit].MaxLOD = D3D12_FLOAT32_MAX;
++        samplers[unit].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
++    }
++    samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
++    samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
++    description.NumParameters = 3;
++    description.pParameters = parameters;
++    description.NumStaticSamplers = RSX_D3D12_GUEST_TEXTURE_UNITS;
++    description.pStaticSamplers = samplers;
++    description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
++    result = D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
++                                        &signature, &local_errors);
++    if (SUCCEEDED(result)) {
++        result = device->lpVtbl->CreateRootSignature(device, 0,
++            signature->lpVtbl->GetBufferPointer(signature), signature->lpVtbl->GetBufferSize(signature),
++#ifdef __cplusplus
++            IID_ID3D12RootSignature, (void**)root);
++#else
++            &IID_ID3D12RootSignature, (void**)root);
++#endif
++    }
++    if (signature) signature->lpVtbl->Release(signature);
++    if (errors) *errors = local_errors;
++    else if (local_errors) local_errors->lpVtbl->Release(local_errors);
++    return result;
++}
++
++#endif

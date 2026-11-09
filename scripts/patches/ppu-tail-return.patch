@@ -1,0 +1,39 @@
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index b19e240..9e28bd7 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -3640,6 +3640,25 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+         "nearest definition" of the base register. A dead block starts at the
+         nearest branch target at or before its blr, or just after a branch."""
+         seg = all_insns[lo:i]
++        # A shared restore helper is another early return terminator. Its
++        # branch target must be outside the whole enclosing function, not just
++        # outside this scan window (a loop can branch before the window).
++        function_lo = all_insns[_scan_lo(i)].addr
++        function_hi = text_hi
++        if func_starts:
++            next_entry = _bisect.bisect_right(func_starts, all_insns[i].addr)
++            if next_entry < len(func_starts):
++                function_hi = func_starts[next_entry]
++        def _returns(x):
++            if x.mnemonic == 'blr':
++                return True
++            if func_starts and x.mnemonic in ('b', 'ba'):
++                try:
++                    target = int(x.operands.split(',')[-1].strip(), 0)
++                    return not (function_lo <= target < function_hi)
++                except ValueError:
++                    pass
++            return False
+         targets = set()
+         for x in seg:
+             if x.mnemonic.startswith('b') and x.mnemonic not in ('blr', 'bctr', 'bctrl', 'blrl'):
+@@ -3653,7 +3672,7 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+             return x.mnemonic.startswith('b') and x.mnemonic not in ('bl', 'bctrl', 'blrl')
+         out, k = [], len(seg) - 1
+         while k >= 0:
+-            if seg[k].mnemonic == 'blr':
++            if _returns(seg[k]):
+                 # back to the block's first insn: a branch target, or the insn
+                 # right after another branch (fallthrough entry)
+                 while k > 0 and seg[k].addr not in targets and not _ends_block(seg[k - 1]):

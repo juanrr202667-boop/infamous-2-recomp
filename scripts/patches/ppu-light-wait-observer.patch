@@ -1,0 +1,98 @@
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -361,6 +361,7 @@
+ extern "C" void ps3_hle_call(unsigned int nid, ppu_context* ctx);
+ extern "C" void i2_light_callsite_trace(ppu_context* ctx, unsigned phase, unsigned site);
+ extern "C" void i2_light_loop_trace(ppu_context* ctx, unsigned phase);
++extern "C" void i2_light_wait_trace(ppu_context* ctx, unsigned phase);
+ 
+ /* Trampoline function pointer for cross-fragment branches (TLS).
+  * PPU_THREAD_LOCAL comes from ppu_recomp.h, included above. */
+@@ -1517,6 +1518,10 @@
+                 # PPC `bl` sets LR = return address (next instr). Emit it so mflr
+                 # reads the correct value AND stack-saved LRs are real return
+                 # addresses -> reliable back-chain unwinding for diagnostics.
++                if not self.prefix and ((insn.addr == 0x00424090 and tgt == 0x00032C50) or (insn.addr == 0x00032D24 and tgt == 0x003707BC)):
++                    enter, leave = (0, 3) if tgt == 0x00032C50 else (1, 2)
++                    return (f"ctx->lr = 0x{insn.addr + 4:08X}; i2_light_wait_trace(ctx, {enter}); "
++                            f"func_{tgt:08X}(ctx); DRAIN_TRAMPOLINE(ctx); i2_light_wait_trace(ctx, {leave});")
+                 if not self.prefix and tgt == 0x00314BC8 and insn.addr + 4 in (0x001DB718, 0x001DB97C):
+                     site = insn.addr + 4
+                     return (f"ctx->lr = 0x{site:08X}; i2_light_callsite_trace(ctx, 0, 0x{site:08X}); "
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3218,6 +3218,72 @@
+     SetLastError(incoming);
+ }
+ 
++/* Diagnostic reads occur synchronously on the guest thread. Guest memory can
++ * still change concurrently, so fields from a record are not atomic. */
++#ifdef _WIN32
++static bool i2_wait_read(uint64_t ea, unsigned size, uint32_t* value) {
++    const uint64_t limit = ppu_vm_size ? ppu_vm_size : 0x100000000ULL;
++    if (!vm_base || !ea || !size || size > 4 || ea >= limit || size > limit-ea) return false;
++    unsigned char b[4]{}; SIZE_T got = 0;
++    if (!ReadProcessMemory(GetCurrentProcess(), vm_base + ea, b, size, &got) || got != size) return false;
++    uint32_t v = 0; for (unsigned i=0; i<size; ++i) v = (v << 8) | b[i]; *value = v; return true;
++}
++extern "C" void i2_light_wait_trace(ppu_context* ctx, unsigned phase) {
++    const DWORD saved_error = GetLastError();
++    struct Config { unsigned delay=0, interval=1000, maximum=20; };
++    static const Config cfg = [] {
++        Config c; char* end=nullptr; const char* v=getenv("I2_JOB_TRACE_AFTER_MS");
++        if (!v || !*v) return c; unsigned long x=strtoul(v,&end,10);
++        if (*end || !x || x>3600000) return c; c.delay=(unsigned)x;
++        v=getenv("I2_JOB_TRACE_INTERVAL_MS"); if (v && *v) { x=strtoul(v,&end,10); if (*end || !x || x>60000) { c.delay=0; return c; } c.interval=(unsigned)x; }
++        v=getenv("I2_JOB_TRACE_MAX"); if (v && *v) { x=strtoul(v,&end,10); if (*end || !x || x>10000) { c.delay=0; return c; } c.maximum=(unsigned)x; }
++        return c;
++    }();
++    struct State { uint64_t start=0, last=0; unsigned count=0, depth=0; bool selected=false; };
++    static thread_local State state;
++    if (!cfg.delay || !ctx || ctx->thread_id != 1) { SetLastError(saved_error); return; }
++    if (phase==0) {
++        if (state.depth++ == 0) {
++            const uint64_t now=GetTickCount64(); if (!state.start) state.start=now;
++            state.selected=now-state.start>=cfg.delay && state.count<cfg.maximum && (!state.last || now-state.last>=cfg.interval);
++            if (state.selected) {
++                state.last=now; ++state.count; uint32_t active=0, flag=0, job_field=0, job_state=0, job_index=0;
++                const uint64_t obj=(uint32_t)ctx->gpr[31], job=(uint32_t)ctx->gpr[3];
++                const bool a=i2_wait_read(obj+0x2c4,4,&active), b=i2_wait_read(obj+0x30e,1,&flag), c=i2_wait_read(obj+0x190,4,&job_field);
++                const bool d=i2_wait_read(job+0x66c,1,&job_state), e=i2_wait_read(job+0x610,1,&job_index);
++                fprintf(stderr,"[i2-job-wait] seq=%u phase=job object=%08X job=%08X obj_active=%u obj_flag=%u obj_job=%08X job_state=%u job_index=%u valid=%d%d%d%d%d concurrent=1\n",
++                        state.count,(unsigned)obj,(unsigned)job,active,flag,job_field,job_state,job_index,a,b,c,d,e);
++            }
++        }
++    } else if (phase==3) {
++        if (state.depth==1 && state.selected) { fprintf(stderr,"[i2-job-wait] seq=%u job_result=%u concurrent=1\n",state.count,(unsigned)ctx->gpr[3]); fflush(stderr); state.selected=false; }
++        if (state.depth) --state.depth;
++    } else if (state.depth==1 && state.selected && phase==1) {
++        const uint64_t wws=(uint32_t)ctx->gpr[3], desc=(uint32_t)ctx->gpr[4]; uint32_t idx=0,gen=0,ticket=0,g0=0,g1=0,ptr=0,min=0xffff,lane[7]{}; unsigned mask=0, lane_mask=0;
++        if (i2_wait_read(desc,1,&idx)) mask|=1;
++        if (i2_wait_read(desc+1,1,&gen)) mask|=2;
++        if (i2_wait_read(desc+2,2,&ticket)) mask|=4;
++        if (i2_wait_read(wws+0xb8,1,&g0)) mask|=8;
++        if (i2_wait_read(wws+0xd4,1,&g1)) mask|=16;
++        if (i2_wait_read(wws+0x80,4,&ptr)) mask|=32;
++        const int sel=(mask&10)==10 && gen==g0?0:(mask&18)==18 && gen==g1?1:-1;
++        if (sel>=0 && (mask&32)) for (unsigned i=0;i<7;i++) {
++            if (i2_wait_read(uint64_t(ptr)+0x42+16*sel+2*i,2,&lane[i])) {
++                lane_mask |= 1u << i;
++                if (lane[i]<min) min=lane[i];
++            }
++        }
++        const bool lanes=lane_mask==0x7f;
++        fprintf(stderr,"[i2-job-wait] seq=%u phase=wws wws=%08X desc=%08X idx=%u gen=%u ticket=%u gen0=%u gen1=%u sel=%d min=%u valid=%02X lanes_valid=%d ptr=%08X lanes=%u,%u,%u,%u,%u,%u,%u lane_mask=%02X concurrent=1\n",state.count,(unsigned)wws,(unsigned)desc,idx,gen,ticket,g0,g1,sel,min,mask,lanes,ptr,lane[0],lane[1],lane[2],lane[3],lane[4],lane[5],lane[6],lane_mask);
++    } else if (state.depth==1 && state.selected && phase==2) {
++        fprintf(stderr,"[i2-job-wait] seq=%u wws_result=%u concurrent=1\n",state.count,(unsigned)ctx->gpr[3]);
++    }
++    SetLastError(saved_error);
++}
++#else
++extern "C" void i2_light_wait_trace(ppu_context*, unsigned) {}
++#endif
++
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
+     /* One-shot: PPU_GUARD_EA=<hex> arms the page guard on that address without

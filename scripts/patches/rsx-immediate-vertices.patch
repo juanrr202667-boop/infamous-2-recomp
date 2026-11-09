@@ -1,0 +1,194 @@
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -612,6 +612,41 @@
+         state->vertex_attrib_output_mask = data;
+         return 0;
+     }
++    /* SET_VERTEX_DATA2F: two floats per attribute. The omitted components
++     * are z=0 and w=1. Completing attribute zero emits one immediate vertex
++     * inside BEGIN/END; other attributes update the current values only. */
++    if (method >= 0x1880u && method < 0x1880u + RSX_MAX_VERTEX_ATTRIBS * 8u) {
++        const u32 attr = (method - 0x1880u) / 8u;
++        const u32 lane = ((method - 0x1880u) / 4u) & 1u;
++        float value; memcpy(&value, &data, sizeof(value));
++        state->vertex_data4f[attr][lane] = value;
++        state->vertex_data4f[attr][2] = 0.0f;
++        state->vertex_data4f[attr][3] = 1.0f;
++        if (attr == 0 && lane == 1 && state->in_begin_end && !state->immediate_explicit_draw) {
++            if (state->immediate_count < RSX_MAX_IMMEDIATE_VERTICES) {
++                memcpy(state->immediate_vertices[state->immediate_count++],
++                       state->vertex_data4f, sizeof(state->vertex_data4f));
++            } else {
++                state->immediate_overflow = 1;
++                static int warned = 0;
++                if (!warned) {
++                    warned = 1;
++                    fprintf(stderr, "[RSX] immediate vertex capacity exceeded; primitive discarded\n");
++                }
++            }
++        }
++        return 0;
++    }
++    /* SET_VERTEX_DATA4UB packs x in the low byte, followed by y, z and w.
++     * This is an unsigned normalized current attribute (the movie writes
++     * 0xFFFFFFFF to attribute two before its position/texcoord pairs). */
++    if (method >= 0x1940u && method < 0x1940u + RSX_MAX_VERTEX_ATTRIBS * 4u) {
++        const u32 attr = (method - 0x1940u) / 4u;
++        for (u32 lane = 0; lane < 4; ++lane)
++            state->vertex_data4f[attr][lane] = (float)((data >> (lane * 8u)) & 255u) / 255.0f;
++        return 0;
++    }
++
+     /* NV4097_SET_VERTEX_DATA4F_M (0x1C00): the constant/"current" value for each
+      * vertex attribute, 16 attributes x 4 floats. The hardware feeds this to
+      * every vertex when the attribute's ARRAY is disabled -- it is not zero.
+@@ -698,6 +733,10 @@
+             state->primitive_type = data;
+             state->in_begin_end = 1;
+             state->begin_epoch++;
++            state->immediate_count = 0;
++            state->immediate_overflow = 0;
++            state->immediate_explicit_draw = 0;
++            state->immediate_active = 0;
+
+             /* Flush dirty state to backend before drawing */
+             if (s_backend) {
+@@ -740,12 +779,26 @@
+                 state->texture_dirty = 0;
+             }
+         } else {
++            if (state->in_begin_end && state->immediate_count &&
++                !state->immediate_overflow && !state->immediate_explicit_draw &&
++                s_backend && s_backend->draw_arrays) {
++                ps3_ms("rsx:draw_immediate");
++                state->immediate_active = 1;
++                s_backend->draw_arrays(s_backend->userdata, state->primitive_type, 0, state->immediate_count);
++                state->immediate_active = 0;
++            }
+             state->in_begin_end = 0;
++            state->immediate_count = 0;
+         }
+         return 0;
+     }
+
++    /* INLINE_ARRAY remains unsupported, but it is an explicit draw stream.
++     * Do not synthesize another draw from current attributes at END. */
++    if (method == 0x1818u) state->immediate_explicit_draw = 1;
++
+     if (method == NV4097_DRAW_ARRAYS) {
++        state->immediate_explicit_draw = 1;
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
+         { static int _d=0; if (_d++ < 32) fprintf(stderr, "[RSX] DRAW_ARRAYS prim=%u first=%u count=%u\n", state->primitive_type, first, count); }
+@@ -790,6 +843,7 @@
+         return 0;
+     }
+     if (method == NV4097_DRAW_INDEX_ARRAY) {
++        state->immediate_explicit_draw = 1;
+         /* [23:0] first index, [31:24] count-1 (same packing as DRAW_ARRAYS). */
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -216,6 +216,7 @@
+ #define RSX_MAX_TEXTURES          16
+ #define RSX_MAX_VERTEX_TEXTURES    4
+ #define RSX_MAX_VERTEX_ATTRIBS    16
++#define RSX_MAX_IMMEDIATE_VERTICES 256
+ #define RSX_MAX_RENDER_TARGETS     4
+
+ typedef struct rsx_texture_state {
+@@ -310,6 +311,14 @@
+      * vertex this register rather than zero, exactly like glColor4f with the
+      * colour array switched off. Default (0,0,0,1) matches the RSX reset state. */
+     float vertex_data4f[RSX_MAX_VERTEX_ATTRIBS][4];
++    /* Immediate vertices are host-owned snapshots of the current attributes.
++     * They remain valid during the synchronous draw_arrays callback only;
++     * a backend must upload or copy them before that callback returns. */
++    float immediate_vertices[RSX_MAX_IMMEDIATE_VERTICES][RSX_MAX_VERTEX_ATTRIBS][4];
++    u32 immediate_count;
++    int immediate_overflow;
++    int immediate_explicit_draw;
++    int immediate_active;
+     /* NV4097_SET_FREQUENCY_DIVIDER_OPERATION (0x1FC0): per-attribute bitmask
+      * selecting how the frequency divisor is applied -- bit set = MODULO
+      * (index = vertex % freq, repeats a mesh), clear = DIVIDE (index =
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5431,6 +5431,14 @@
+  * same way this one does, rather than each porting the logic again. */
+ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+ {
++    if (state->immediate_active) {
++        memset(out16, 0, VP_VERT_STRIDE);
++        for (u32 i = 0; i < RSX_MAX_VERTEX_ATTRIBS; ++i) out16[i].v[3] = 1.0f;
++        if (vi < state->immediate_count && vi < RSX_MAX_IMMEDIATE_VERTICES)
++            memcpy(out16, state->immediate_vertices[vi], VP_VERT_STRIDE);
++        rsx_vtx_pos_dbg(state, out16[0].v, 4);
++        return;
++    }
+     for (int i = 0; i < 16; i++) {
+         rsx_fetch_attrib(state, i, vi, out16[i].v);
+         if (i == 0) {
+@@ -5566,9 +5574,9 @@
+ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
+ {
+     extern uint8_t* vm_base;
+-    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+-    if (!state->vertex_attribs[0].enabled) return 0;
+-    vp_attrs_dbg(state);
++    if (!state || (!vm_base && !state->immediate_active) || !s_d3d.vp_vb_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled && !state->immediate_active) return 0;
++    if (!state->immediate_active) vp_attrs_dbg(state);
+     u32 quads = count / 4;
+     u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (quads * 6 > maxv) quads = maxv / 6;
+@@ -5600,9 +5608,9 @@
+ {
+     extern uint8_t* vm_base;
+     s_req_verts += count; s_req_draws++;
+-    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+-    if (!state->vertex_attribs[0].enabled) return 0;
+-    vp_attrs_dbg(state);
++    if (!state || (!vm_base && !state->immediate_active) || !s_d3d.vp_vb_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled && !state->immediate_active) return 0;
++    if (!state->immediate_active) vp_attrs_dbg(state);
+     u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+     if (count > maxv) { s_drop_draws++;
+         { static int _n = 0; if (getenv("VBFULL") && _n++ < 12)
+@@ -5666,8 +5674,8 @@
+ static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan)
+ {
+     extern uint8_t* vm_base;
+-    if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
+-    if (!state->vertex_attribs[0].enabled) return 0;
++    if (!state || (!vm_base && !state->immediate_active) || !s_d3d.vp_vb_mapped) return 0;
++    if (!state->vertex_attribs[0].enabled && !state->immediate_active) return 0;
+     if (count < 3) return 0;
+     u32 tris = count - 2;
+     u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+@@ -6008,6 +6016,24 @@
+     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
+     if (count == 0 || count > MAX_VERTICES) return;
+
++    /* Immediate snapshots are supported by the VP uploads below only. Reject
++     * any other route before the fallback can fetch unrelated guest arrays. */
++    if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->immediate_active) {
++        const int supported = primitive == RSX_PRIMITIVE_QUADS ||
++            primitive == RSX_PRIMITIVE_TRIANGLES || primitive == RSX_PRIMITIVE_TRIANGLE_STRIP ||
++            primitive == RSX_PRIMITIVE_TRIANGLE_FAN;
++        if (!supported || !s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig ||
++            s_d3d.current_rsx_state->vp_ucode_bytes < 16) {
++            static unsigned warned = 0;
++            if (warned < 8) {
++                warned++;
++                fprintf(stderr, "[D3D12] immediate draw rejected before guest fetch: prim=%u vp_bytes=%u\n",
++                        primitive, s_d3d.current_rsx_state->vp_ucode_bytes);
++            }
++            return;
++        }
++    }
++
+     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
+      * dbgfont draws all text as quads. Prefer the real vertex-program path
+      * (exact position + texcoord): upload raw float4 attrib0 into vp_vb and

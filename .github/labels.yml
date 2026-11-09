@@ -1,0 +1,42 @@
+# Repository labels. This file is a reviewed declaration, not an automatic
+# GitHub setting. Create/update labels with scripts/setup_github_labels.ps1 or
+# `gh label create` after authenticating.
+- name: bug
+  color: d73a4a
+  description: Reproduced defect with a concrete observation
+- name: build
+  color: 1d76db
+  description: CMake, toolchain, packaging, or reproducibility
+- name: ci
+  color: 0e8a16
+  description: GitHub Actions and automated checks
+- name: documentation
+  color: 0075ca
+  description: Documentation and contributor guidance
+- name: rsx
+  color: 5319e7
+  description: RSX command decoding and graphics state
+- name: spu
+  color: b60205
+  description: SPU interpreter, DMA, channels, SPURS
+- name: ppu
+  color: c2e0c6
+  description: PPU execution, syscalls, memory
+- name: audio
+  color: fbca04
+  description: cellAudio, mixing, device output
+- name: performance
+  color: e99695
+  description: Measured performance work, not speculative optimization
+- name: good first issue
+  color: 7057ff
+  description: Small, well-bounded task with a clear acceptance test
+- name: help wanted
+  color: 008672
+  description: Maintainers welcome an external contribution
+- name: needs-triage
+  color: d4c5f9
+  description: Not yet confirmed or categorized
+- name: proprietary-blocked
+  color: 000000
+  description: Cannot be reproduced publicly without local game material

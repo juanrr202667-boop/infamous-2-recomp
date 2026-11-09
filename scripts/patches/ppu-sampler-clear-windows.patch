@@ -1,0 +1,11 @@
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -606,6 +606,8 @@
+     memset(s_rva_key, 0, sizeof s_rva_key); memset(s_rva_ct, 0, sizeof s_rva_ct);
+     memset(s_t2_id, 0, sizeof s_t2_id); memset(s_t2_guest, 0, sizeof s_t2_guest);
+     memset(s_t2_ntdll, 0, sizeof s_t2_ntdll); memset(s_t2_other, 0, sizeof s_t2_other);
++    memset(s_samp_ct, 0, sizeof s_samp_ct);
++    memset(s_mod_ct, 0, sizeof s_mod_ct); memset(s_tid_ct, 0, sizeof s_tid_ct);
+     s_samp_total = s_samp_guest = 0;
+     fflush(stderr);
+ }

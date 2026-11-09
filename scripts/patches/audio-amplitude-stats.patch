@@ -1,0 +1,158 @@
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -569,9 +569,59 @@
+ }
+ #endif
+ 
++/* AUDIO_AMPLITUDE_STATS=1 observes the actual consumed samples and the mix
++ * before the host clamp. Counts are scalar samples, not frames. Reporting
++ * every 938 mixed blocks bounds logging (~5 seconds at 48 kHz); this is an
++ * audio-time window, not a claim about device playback or wall-clock pace.
++ * State is owned by the mixer thread. No PCM or gain is changed here. */
++typedef struct {
++    u64 count, finite, nonfinite, rails, over;
++    double sum, squares, peak;
++} AudioAmplitudeStats;
++static struct {
++    int initialized, enabled;
++    unsigned blocks;
++    AudioAmplitudeStats source[CELL_AUDIO_PORT_MAX];
++    AudioAmplitudeStats contribution[CELL_AUDIO_PORT_MAX];
++    AudioAmplitudeStats mix;
++} s_amplitude_stats;
++
++static void audio_amplitude_sample(AudioAmplitudeStats* stats, float sample)
++{
++    stats->count++;
++    if (!isfinite(sample)) { stats->nonfinite++; return; }
++    const double value = sample, magnitude = fabs(value);
++    stats->finite++;
++    stats->sum += value;
++    stats->squares += value * value;
++    if (magnitude > stats->peak) stats->peak = magnitude;
++    if (magnitude == 1.0) stats->rails++;
++    if (magnitude > 1.0) stats->over++;
++}
++
++static void audio_amplitude_report(const char* stage, int port, AudioAmplitudeStats* stats)
++{
++    if (!stats->count) return;
++    fprintf(stderr, "[audio-amplitude] stage=%s port=%d samples=%llu finite=%llu nonfinite=%llu "
++            "rails=%llu over=%llu peak=%.9g mean=%.9g rms=%.9g blocks=%u (before-host-clamp)\n",
++            stage, port, (unsigned long long)stats->count, (unsigned long long)stats->finite,
++            (unsigned long long)stats->nonfinite, (unsigned long long)stats->rails,
++            (unsigned long long)stats->over, stats->peak,
++            stats->finite ? stats->sum / stats->finite : 0.0,
++            stats->finite ? sqrt(stats->squares / stats->finite) : 0.0,
++            s_amplitude_stats.blocks);
++    memset(stats, 0, sizeof(*stats));
++}
++
+ /* Mix one block from all active ports into s_mix_buffer (stereo float) */
+ static void audio_mix_one_block(void)
+ {
++    if (!s_amplitude_stats.initialized) {
++        const char* value = getenv("AUDIO_AMPLITUDE_STATS");
++        s_amplitude_stats.enabled = value && *value && strcmp(value, "0") != 0;
++        s_amplitude_stats.initialized = 1;
++    }
++    const int observe_amplitude = s_amplitude_stats.enabled;
+     memset(s_mix_buffer, 0, sizeof(s_mix_buffer));
+ 
+     mutex_lock(&s_audio_mutex);
+@@ -603,6 +653,13 @@
+         float level = port->param.level;
+         if (level <= 0.0f) level = 1.0f;
+         if (level > 1.0f) level = 1.0f;
++        if (observe_amplitude && port->read_index == 0) {
++            u32 level_bits; memcpy(&level_bits, &port->param.level, sizeof(level_bits));
++            fprintf(stderr, "[audio-gain] port=%d channels=%u attr=%016llX level_bits=%08X "
++                    "level=%.9g applied=%.9g (observed-existing-policy)\n", p, nch,
++                    (unsigned long long)port->param.attr, level_bits,
++                    (double)port->param.level, (double)level);
++        }
+ 
+         /* Read one block at the current read_index */
+         u32 block_idx = (u32)(port->read_index % nblock);
+@@ -634,26 +691,52 @@
+         for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; s++) {
+             float left, right;
+             if (nch >= 2) {
+-                left  = ld_be_f32(&src[s * nch + 0]) * level;
+-                right = ld_be_f32(&src[s * nch + 1]) * level;
++                const float raw_left = ld_be_f32(&src[s * nch + 0]);
++                const float raw_right = ld_be_f32(&src[s * nch + 1]);
++                left = raw_left * level;
++                right = raw_right * level;
++                if (observe_amplitude) {
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_left);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_right);
++                }
+             } else {
+                 /* Mono: duplicate to both channels */
+-                left = right = ld_be_f32(&src[s]) * level;
++                const float raw = ld_be_f32(&src[s]);
++                left = right = raw * level;
++                if (observe_amplitude) audio_amplitude_sample(&s_amplitude_stats.source[p], raw);
+             }
+ 
+             /* If 7.1, mix center and other channels into stereo with headroom */
+             if (nch == 8) {
+-                float center = ld_be_f32(&src[s * 8 + 2]) * level * 0.707f;
+-                float lfe    = ld_be_f32(&src[s * 8 + 3]) * level * 0.5f;
+-                float rl     = ld_be_f32(&src[s * 8 + 4]) * level * 0.5f;
+-                float rr     = ld_be_f32(&src[s * 8 + 5]) * level * 0.5f;
+-                float sl     = ld_be_f32(&src[s * 8 + 6]) * level * 0.3f;
+-                float sr     = ld_be_f32(&src[s * 8 + 7]) * level * 0.3f;
++                const float raw_center = ld_be_f32(&src[s * 8 + 2]);
++                const float raw_lfe = ld_be_f32(&src[s * 8 + 3]);
++                const float raw_rl = ld_be_f32(&src[s * 8 + 4]);
++                const float raw_rr = ld_be_f32(&src[s * 8 + 5]);
++                const float raw_sl = ld_be_f32(&src[s * 8 + 6]);
++                const float raw_sr = ld_be_f32(&src[s * 8 + 7]);
++                float center = raw_center * level * 0.707f;
++                float lfe = raw_lfe * level * 0.5f;
++                float rl = raw_rl * level * 0.5f;
++                float rr = raw_rr * level * 0.5f;
++                float sl = raw_sl * level * 0.3f;
++                float sr = raw_sr * level * 0.3f;
++                if (observe_amplitude) {
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_center);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_lfe);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_rl);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_rr);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_sl);
++                    audio_amplitude_sample(&s_amplitude_stats.source[p], raw_sr);
++                }
+                 const float downmix_scale = 1.0f / (1.0f + 0.707f + 0.5f + 0.5f + 0.3f);
+                 left  = (left  + center + lfe + rl + sl) * downmix_scale;
+                 right = (right + center + lfe + rr + sr) * downmix_scale;
+             }
+ 
++            if (observe_amplitude) {
++                audio_amplitude_sample(&s_amplitude_stats.contribution[p], left);
++                audio_amplitude_sample(&s_amplitude_stats.contribution[p], right);
++            }
+             s_mix_buffer[s * 2 + 0] += left;
+             s_mix_buffer[s * 2 + 1] += right;
+         }
+@@ -672,6 +755,19 @@
+     }
+ 
+     mutex_unlock(&s_audio_mutex);
++
++    if (observe_amplitude) {
++        for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; ++i)
++            audio_amplitude_sample(&s_amplitude_stats.mix, s_mix_buffer[i]);
++        if (++s_amplitude_stats.blocks == 938) {
++            for (int p = 0; p < CELL_AUDIO_PORT_MAX; ++p) {
++                audio_amplitude_report("source", p, &s_amplitude_stats.source[p]);
++                audio_amplitude_report("contribution", p, &s_amplitude_stats.contribution[p]);
++            }
++            audio_amplitude_report("mix", -1, &s_amplitude_stats.mix);
++            s_amplitude_stats.blocks = 0;
++        }
++    }
+ 
+     /* Clip to [-1.0, 1.0] */
+     for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {

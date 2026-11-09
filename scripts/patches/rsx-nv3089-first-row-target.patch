@@ -1,0 +1,213 @@
+--- a/libs/video/cellGcmSys.h
++++ b/libs/video/cellGcmSys.h
+@@ -29,10 +29,50 @@ typedef struct cellGcmTransferProbe {
+     u32 source_offset, destination_offset;
+     u32 source_location, destination_location;
+     u32 width, height, source_pitch, destination_pitch;
++    /* Raw NV3089 source origin (12.4 fixed point, x in the low half). Recorded
++     * so a copy whose origin is not zero can still be told apart from one that
++     * starts at the surface corner. */
++    u32 source_origin;
++    /* Newest declared surface whose FIRST ROW contains the requested source
++     * byte, as reported by the optional lookup below. Metadata only. */
++    u32 target_location, target_offset, target_pitch, target_width, target_height;
++    u64 target_epoch;
++    int target_found, target_argb8;
+ } cellGcmTransferProbe;
+ typedef void (*cellGcmTransferProbeObserver)(const cellGcmTransferProbe*);
+ void cellGcmSetTransferProbeObserver(cellGcmTransferProbeObserver observer);
+ 
++/* A candidate producer surface, as the backend knows it. `epoch` orders them:
++ * the newest wins. `argb8` is nonzero when the surface is 32-bit colour. */
++typedef struct cellGcmTransferProbeTarget {
++    u32 location, offset, pitch, width, height;
++    u64 epoch;
++    u32 argb8;
++} cellGcmTransferProbeTarget;
++typedef int (*cellGcmTransferProbeTargetLookup)(u32 location, u32 offset, u32 pitch,
++        cellGcmTransferProbeTarget* out);
++void cellGcmSetTransferProbeTargetLookup(cellGcmTransferProbeTargetLookup lookup);
++
++/* Whether the requested source byte falls inside the surface's FIRST row.
++ *
++ * This mirrors the selection rule the public macOS reference uses before it
++ * writes a rendered target back into guest memory, and the reason is recorded
++ * there: a looser containment predicate let a phantom 1280x720 target at
++ * offset 0 claim a request addressed to a later allocation, and the write-back
++ * then overwrote VRAM from 0 instead of the requested surface. Only the first
++ * row can identify a producer; a request that lands on a later row is not a
++ * match, however well it is contained. */
++static inline int cellGcmTransferProbeFirstRow(u32 location, u32 offset,
++        u32 surface_location, u32 surface_offset, u32 surface_pitch, u32 surface_width)
++{
++    if (!surface_pitch || !surface_width) return 0;
++    if (location != surface_location || offset < surface_offset) return 0;
++    const u32 delta = offset - surface_offset;
++    if (delta >= surface_pitch) return 0;          /* first row only */
++    if (delta & 3u) return 0;                      /* 32-bit pixel grid */
++    return (u64)delta < (u64)surface_width * 4;    /* inside the row's pixels */
++}
++
+ /* Shared metadata association; this does not assert GPU content validity. */
+ static inline int cellGcmTransferProbeFits(const cellGcmTransferProbe* event,
+         u32 location, u32 offset, u32 pitch, u32 width, u32 height)
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -851,6 +851,15 @@ void cellGcmSetTransferProbeObserver(cellGcmTransferProbeObserver observer)
+     s_transfer_probe_observer = observer;
+ }
+ 
++/* Optional read-only target lookup, owned by the backend. It answers from
++ * bookkeeping the backend already has; it must not submit, wait, map or write
++ * anything, and registration belongs to backend init/shutdown. */
++static cellGcmTransferProbeTargetLookup s_transfer_probe_targets;
++void cellGcmSetTransferProbeTargetLookup(cellGcmTransferProbeTargetLookup lookup)
++{
++    s_transfer_probe_targets = lookup;
++}
++
+ typedef struct GcmProbeSample {
+     u32 first, last, hash, valid, nonzero;
+ } GcmProbeSample;
+@@ -902,11 +911,14 @@ static int gcm_probe_begin(cellGcmTransferProbe* event, u32 src, u32 dst,
+         initialized = 1;
+     }
+     if (!gate || !*gate || count >= (u32)maximum) return 0;
+-    /* Deliberately observe only the verified linear ARGB 1:1, zero-origin
+-     * path. Scaled, swizzled and clipped transfers need different samples. */
++    /* Observe the verified linear ARGB 1:1 path only. The source origin is
++     * recorded rather than required to be zero: the copies that feed textures
++     * in this title address a sub-rectangle of the surface, and excluding them
++     * left every measurement on the corner case. Scaled, swizzled and clipped
++     * transfers still need their own samples. */
+     if ((s_nv3089.fmt & 0xFF) != 3 || s_nv309e.active ||
+             s_nv3089.ds_dx != 0x100000 || s_nv3089.dt_dy != 0x100000 ||
+-            s_nv3089.in_uv || s_nv3089.out_pt || s_nv3089.clip_pt ||
++            s_nv3089.out_pt || s_nv3089.clip_pt ||
+             ((s_nv3089.clip_sz & 0xFFFF) && (s_nv3089.clip_sz & 0xFFFF) < w) ||
+             ((s_nv3089.clip_sz >> 16) && (s_nv3089.clip_sz >> 16) < h) ||
+             (u64)w * 4 > sp || (u64)w * 4 > dp) return 0;
+@@ -921,6 +933,28 @@ static int gcm_probe_begin(cellGcmTransferProbe* event, u32 src, u32 dst,
+     event->destination_location = s_gcm2d.dst_dma == 0xFEED0001u ? 2u : 1u;
+     event->width = w; event->height = h;
+     event->source_pitch = sp; event->destination_pitch = dp;
++    event->source_origin = s_nv3089.in_uv;
++    /* The event is a stack object: a copy with no candidate must report zero
++     * metadata, never the previous event's target. */
++    event->target_found = 0;
++    event->target_location = event->target_offset = event->target_pitch = 0;
++    event->target_width = event->target_height = 0;
++    event->target_epoch = 0;
++    event->target_argb8 = 0;
++    if (s_transfer_probe_targets) {
++        cellGcmTransferProbeTarget target = {0};
++        if (s_transfer_probe_targets(event->source_location, event->source_offset,
++                event->source_pitch, &target)) {
++            event->target_found = 1;
++            event->target_location = target.location;
++            event->target_offset = target.offset;
++            event->target_pitch = target.pitch;
++            event->target_width = target.width;
++            event->target_height = target.height;
++            event->target_epoch = target.epoch;
++            event->target_argb8 = target.argb8 ? 1 : 0;
++        }
++    }
+     if (s_transfer_probe_observer) s_transfer_probe_observer(event);
+     return 1;
+ }
+@@ -1104,13 +1138,18 @@ static void nv3089_blit(void)
+         printf("[NV3089P] id=%u src=%u:%08X/%u dst=%u:%08X/%u size=%ux%u "
+                "src_first=%08X src_last=%08X src_hash=%08X src_valid=%04X src_nonzero=%u "
+                "before_first=%08X before_last=%08X before_hash=%08X before_valid=%04X "
+-               "after_first=%08X after_last=%08X after_hash=%08X after_valid=%04X after_nonzero=%u sparse=16\n",
++               "after_first=%08X after_last=%08X after_hash=%08X after_valid=%04X after_nonzero=%u sparse=16 "
++               "in_uv=%08X target=%d target_loc=%u target_off=%08X target_pitch=%u "
++               "target_size=%ux%u target_epoch=%llu target_argb8=%d\n",
+                probe.id, probe.source_location, src, in_pitch,
+                probe.destination_location, dst, dst_pitch, out_w, out_h,
+                source_sample.first, source_sample.last, source_sample.hash,
+                source_sample.valid, source_sample.nonzero,
+                before_sample.first, before_sample.last, before_sample.hash, before_sample.valid,
+-               after.first, after.last, after.hash, after.valid, after.nonzero);
++               after.first, after.last, after.hash, after.valid, after.nonzero,
++               probe.source_origin, probe.target_found, probe.target_location,
++               probe.target_offset, probe.target_pitch, probe.target_width, probe.target_height,
++               (unsigned long long)probe.target_epoch, probe.target_argb8);
+     }
+     { static int _n = 0; static int cap = -1;
+       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7040,6 +7040,35 @@ static rsx_backend s_d3d12_backend = {0};
+  * Public API
+  * -----------------------------------------------------------------------*/
+ 
++/* Read-only selection of the NEWEST offscreen view whose first row contains
++ * the requested source byte. This is the rule the public macOS reference uses
++ * before its write-back, kept here as metadata: no submit, no wait, no map and
++ * no guest write. A view with no resource or no epoch cannot win. */
++static int d3d12_transfer_probe_target(u32 location, u32 offset, u32 pitch,
++        cellGcmTransferProbeTarget* out)
++{
++    u64 newest = 0;
++    int found = 0;
++    if (!out) return 0;
++    for (u32 i = 0; i < s_off_rt_count && i < MAX_OFF_RTS; ++i) {
++        const rsx_linear_version* view = &s_off_rt_views[i];
++        if (!s_d3d.off_rt[i].res || view->view.offset > UINT32_MAX) continue;
++        if (!cellGcmTransferProbeFirstRow(location, offset, view->view.location,
++                (u32)view->view.offset, view->view.pitch, view->view.width)) continue;
++        if (found && view->complete_at <= newest) continue;
++        newest = view->complete_at;
++        found = 1;
++        out->location = view->view.location;
++        out->offset = (u32)view->view.offset;
++        out->pitch = view->view.pitch;
++        out->width = view->view.width;
++        out->height = view->view.height;
++        out->epoch = view->complete_at;
++        out->argb8 = (s_d3d.off_rt[i].dxgi == DXGI_FORMAT_R8G8B8A8_UNORM) ? 1u : 0u;
++    }
++    return found;
++}
++
+ /* Metadata only: never submit, wait, map, write guest bytes or mutate replay.
+  * A declared producer does not prove rasterized pixels. Completed view epochs
+  * belong to earlier submissions when the relevant operations remain pending. */
+@@ -7076,12 +7105,17 @@ static void d3d12_transfer_probe(const cellGcmTransferProbe* event)
+     const rsx_state* state = s_d3d.current_rsx_state;
+     printf("[NV3089GPU] id=%u frame=%llu pending_ops=%u declared_color_ops=%u last_color_op=%u "
+            "completed_views=%u newest_epoch=%llu committed_epoch=%llu replay_pending=%d "
+-           "src=%u:%08X/%u current_zeta=%08X/%u zeta_dma=%08X surface_format=%08X metadata_only=1\n",
++           "src=%u:%08X/%u current_zeta=%08X/%u zeta_dma=%08X surface_format=%08X "
++           "in_uv=%08X target_found=%d target_loc=%u target_off=%08X target_pitch=%u "
++           "target_epoch=%llu target_argb8=%d metadata_only=1\n",
+            event->id, (unsigned long long)s_d3d.frame_count, s_d3d.draw_count, declared, last,
+            views, (unsigned long long)newest, (unsigned long long)s_off_rt_epoch, s_temporal_pending,
+            event->source_location, event->source_offset, event->source_pitch,
+            state ? state->surface_zeta_offset : 0, state ? state->surface_zeta_pitch : 0,
+-           state ? state->surface_zeta_dma : 0, state ? state->surface_format : 0);
++           state ? state->surface_zeta_dma : 0, state ? state->surface_format : 0,
++           event->source_origin, event->target_found, event->target_location,
++           event->target_offset, event->target_pitch,
++           (unsigned long long)event->target_epoch, event->target_argb8);
+ }
+ 
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+@@ -7145,6 +7179,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+ 
+     rsx_set_backend(&s_d3d12_backend);
+     cellGcmSetTransferProbeObserver(d3d12_transfer_probe);
++    cellGcmSetTransferProbeTargetLookup(d3d12_transfer_probe_target);
+ 
+     s_d3d.initialized = 1;
+     s_d3d.last_fps_time = GetTickCount64();
+@@ -7157,6 +7192,7 @@ void rsx_d3d12_backend_shutdown(void)
+ {
+     if (!s_d3d.initialized) return;
+     cellGcmSetTransferProbeObserver(NULL);
++    cellGcmSetTransferProbeTargetLookup(NULL);
+ 
+     wait_for_gpu();
+     UINT64 completed = s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence);

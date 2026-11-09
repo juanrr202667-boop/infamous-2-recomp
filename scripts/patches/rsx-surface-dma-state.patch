@@ -1,0 +1,75 @@
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -112,6 +112,26 @@
+ static int process_surface_method(rsx_state* state, u32 method, u32 data)
+ {
+     switch (method) {
++    case NV4097_SET_CONTEXT_DMA_COLOR_A:
++        state->surface_color_dma[0] = data;
++        state->surface_dma_seen |= 1u << 0;
++        return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_B:
++        state->surface_color_dma[1] = data;
++        state->surface_dma_seen |= 1u << 1;
++        return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_C:
++        state->surface_color_dma[2] = data;
++        state->surface_dma_seen |= 1u << 2;
++        return 0;
++    case NV4097_SET_CONTEXT_DMA_COLOR_D:
++        state->surface_color_dma[3] = data;
++        state->surface_dma_seen |= 1u << 3;
++        return 0;
++    case NV4097_SET_CONTEXT_DMA_ZETA:
++        state->surface_zeta_dma = data;
++        state->surface_dma_seen |= 1u << 4;
++        return 0;
+     case NV4097_SET_SURFACE_FORMAT:
+         state->surface_format = data;
+         state->surface_dirty = 1;
+@@ -373,7 +393,12 @@
+         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), data);
+         return 0;
+       } }
+-    if ((method >= 0x200 && method <= 0x23C) ||
++    if (method == NV4097_SET_CONTEXT_DMA_COLOR_A ||
++        method == NV4097_SET_CONTEXT_DMA_COLOR_B ||
++        method == NV4097_SET_CONTEXT_DMA_COLOR_C ||
++        method == NV4097_SET_CONTEXT_DMA_COLOR_D ||
++        method == NV4097_SET_CONTEXT_DMA_ZETA ||
++        (method >= 0x200 && method <= 0x23C) ||
+         (method >= 0x280 && method <= 0x28C))
+         return process_surface_method(state, method, data);
+ 
+--- a/libs/video/rsx_commands.h
++++ b/libs/video/rsx_commands.h
+@@ -45,8 +45,8 @@
+  * 0xFEED0000 is RSX local memory and 0xFEED0001 is IO-mapped main memory.
+  * RSX offsets are two overlapping number spaces, so this is what tells a
+  * surface at offset X from a texture at offset X in the other one. Decoded
+- * by rsx_dispatch (rsx_dsp_surface.color_location); rsx_state has no field
+- * for it and rsx_process_method ignores it. */
++ * by rsx_dispatch (rsx_dsp_surface.color_location). rsx_state preserves the
++ * raw handles and seen bits without inferring a location for unknown values. */
+ #define NV4097_SET_CONTEXT_DMA_COLOR_A         0x00000194
+ /* ...and the same for colour target B, which sits BELOW A in the register
+  * file rather than after it (C and D are at 0x1B4 and 0x1B8). An MRT set
+@@ -54,6 +54,8 @@
+  * engine cannot match a texture unit against, since it keys surfaces by
+  * (location, offset). */
+ #define NV4097_SET_CONTEXT_DMA_COLOR_B         0x0000018C
++#define NV4097_SET_CONTEXT_DMA_COLOR_C         0x000001B4
++#define NV4097_SET_CONTEXT_DMA_COLOR_D         0x000001B8
+ /* ...and the same question for the depth buffer, which a texture unit coming
+  * back to sample it has to agree with. */
+ #define NV4097_SET_CONTEXT_DMA_ZETA            0x00000198
+@@ -247,6 +249,9 @@
+     u32 surface_format;
+     u32 surface_color_offset[RSX_MAX_RENDER_TARGETS];
+     u32 surface_color_pitch[RSX_MAX_RENDER_TARGETS];
++    u32 surface_color_dma[RSX_MAX_RENDER_TARGETS]; /* Raw context DMA handles. */
++    u32 surface_zeta_dma;
++    u32 surface_dma_seen; /* Bits 0..3: A/B/C/D; bit 4: ZETA. Zero means unseen. */
+     u32 surface_zeta_offset;
+     u32 surface_zeta_pitch;
+     u32 surface_clip_x, surface_clip_y;

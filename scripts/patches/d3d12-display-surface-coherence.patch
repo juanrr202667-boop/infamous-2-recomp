@@ -1,0 +1,607 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -45,6 +45,7 @@
+ #include "rsx_linear_metadata.h"
+ #include "rsx_d3d12_linear_copy.h"
+ #include "rsx_d3d12_feedback.h"
++#include "rsx_d3d12_display_bridge.h"
+ #include "rsx_d3d12_shader_resources.h"
+ 
+ /* We need these GUIDs — define them here to avoid uuid.lib dependency */
+@@ -364,6 +365,8 @@
+ static D3D12State s_d3d;
+ static rsx_linear_version s_off_rt_views[MAX_OFF_RTS];
+ static rsx_d3d12_feedback_context s_feedback;
++static rsx_d3d12_display_bridge_context s_display_bridge;
++static int s_had_direct_backbuffer = 0;
+ static rsx_linear_version s_pending_rt_views[MAX_OFF_RTS];
+ static u32 s_off_rt_count;
+ static u64 s_off_rt_epoch, s_pending_rt_epoch;
+@@ -2015,10 +2018,14 @@
+          | ((u32)gl_blend_op_d3d(st->blend_equation >> 16) << 24);
+ }
+ 
+-/* Bound colour target count for a draw record: 1 (target A) + the contiguous
+- * prefix of MRT B/C/D offsets. */
++/* Declared members stay active even when their guest address is zero.
++ * The old records without metadata retain their legacy contiguous prefix. */
+ static int dr_num_rts(const D3D12DrawRecord* dr)
+ {
++    if (dr->surface_meta.valid) {
++        int declared = rsx_declared_surface_target_count(&dr->surface_meta);
++        return declared > 0 ? declared : 0;
++    }
+     int n = 1;
+     while (n < 4 && dr->rt_mrt[n - 1]) n++;
+     return n;
+@@ -3446,9 +3453,9 @@
+ {
+     if (!out) return;
+     if (draw < MAX_DRAWS) {
+-        fprintf(out, "      temporal_targets=[%d,%d,%d,%d] mask=0x%04X feedback=0x%04X",
++        fprintf(out, "      temporal_targets=[%d,%d,%d,%d] mask=0x%04X feedback=0x%04X display=%u",
+                 s_rt_plan[draw].target[0], s_rt_plan[draw].target[1],
+-                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3], s_rt_plan[draw].texture_mask, s_rt_plan[draw].feedback_mask);
++                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3], s_rt_plan[draw].texture_mask, s_rt_plan[draw].feedback_mask, s_rt_plan[draw].display_target);
+         for (int u = 0; u < RSX_MAX_TEXTURES; ++u) {
+             if (s_d3d.draws[draw].tex_rt[u] >= 0) {
+                 fprintf(out, " tex_rt[%d]=%d", u, s_d3d.draws[draw].tex_rt[u]);
+@@ -3530,6 +3537,37 @@
+     fflush(stderr); fflush(stdout);
+     /* No partial command list is submitted or reused after a failed plan. */
+     ExitProcess(2);
++}
++
++/* A proved guest identity takes priority over dimension-based substitutions.
++ * Return zero only for an inactive unit or an independent uploaded asset. */
++static int temporal_bind_target_texture(u32 draw, int unit, u32 heap_slot)
++{
++    if (draw >= s_d3d.draw_count || draw >= MAX_DRAWS || unit < 0 || unit >= RSX_MAX_TEXTURES)
++        temporal_abort(draw, unit, "invalid canonical texture binding index");
++    u32 bit = 1u << unit;
++    if (!(s_rt_plan[draw].texture_mask & bit)) return 0;
++    int slot = s_d3d.draws[draw].tex_rt[unit];
++    if (slot == -1) {
++        if (s_rt_plan[draw].feedback_mask & bit)
++            temporal_abort(draw, unit, "feedback texture has no canonical source");
++        return 0;
++    }
++    if (slot < 0 || s_off_rt_count > MAX_OFF_RTS ||
++            (u32)slot >= s_off_rt_count || (u32)slot >= MAX_OFF_RTS ||
++            !s_d3d.off_rt[slot].res || s_d3d.off_rt[slot].dxgi != DXGI_FORMAT_R8G8B8A8_UNORM)
++        temporal_abort(draw, unit, "invalid canonical texture binding resource");
++    ID3D12Resource* resource = s_d3d.off_rt[slot].res;
++    if (s_rt_plan[draw].feedback_mask & bit) {
++        rsx_d3d12_linear_resource canonical = {resource, &s_d3d.off_rt[slot].st,
++            s_off_rt_views[slot].view, (DXGI_FORMAT)s_d3d.off_rt[slot].dxgi};
++        if ((u32)slot >= 32 || !rsx_d3d12_feedback_matches(&s_feedback.slots[slot], &canonical))
++            temporal_abort(draw, unit, "invalid canonical feedback binding resource");
++        resource = s_feedback.slots[slot].resource;
++    }
++    srv_write(heap_slot, resource, DXGI_FORMAT_R8G8B8A8_UNORM,
++        D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++    return 1;
+ }
+ 
+ /* Reservation creates resources only. Recording the snapshot belongs to
+@@ -3577,6 +3615,42 @@
+             temporal_abort(draw, unit, "feedback snapshot failed; discard command list");
+         }
+         visited |= 1u << slot;
++    }
++}
++
++/* The display is a physical rendering destination, while the plan retains
++ * its declared guest identity. Copies bridge those two resource instances. */
++static void temporal_display_before(u32 draw)
++{
++    if (!s_rt_plan[draw].display_target) return;
++    int slot = s_rt_plan[draw].target[0];
++    if (slot < 0 || (u32)slot >= s_off_rt_count)
++        temporal_abort(draw, -1, "invalid canonical display identity");
++    rsx_d3d12_linear_resource canonical = {s_d3d.off_rt[slot].res,
++        &s_d3d.off_rt[slot].st, s_pending_rt_views[slot].view,
++        (DXGI_FORMAT)s_d3d.off_rt[slot].dxgi};
++    if (!rsx_d3d12_display_bridge_begin(&s_display_bridge, &canonical)) {
++        fprintf(stderr, "[DISPLAY_FAILURE] stage=%s hr=0x%08lX view=%d\n",
++            s_display_bridge.last_error ? s_display_bridge.last_error : "unknown",
++            (unsigned long)s_display_bridge.last_hr, slot);
++        temporal_abort(draw, -1, "display load failed; discard command list");
++    }
++}
++
++static void temporal_display_after(u32 draw)
++{
++    if (!s_rt_plan[draw].display_target) return;
++    int slot = s_rt_plan[draw].target[0];
++    if (slot < 0 || (u32)slot >= s_off_rt_count)
++        temporal_abort(draw, -1, "invalid canonical display write identity");
++    rsx_d3d12_linear_resource canonical = {s_d3d.off_rt[slot].res,
++        &s_d3d.off_rt[slot].st, s_pending_rt_views[slot].view,
++        (DXGI_FORMAT)s_d3d.off_rt[slot].dxgi};
++    if (!rsx_d3d12_display_bridge_end(&s_display_bridge, &canonical)) {
++        fprintf(stderr, "[DISPLAY_FAILURE] stage=%s hr=0x%08lX view=%d\n",
++            s_display_bridge.last_error ? s_display_bridge.last_error : "unknown",
++            (unsigned long)s_display_bridge.last_hr, slot);
++        temporal_abort(draw, -1, "display writeback failed; discard command list");
+     }
+ }
+ 
+@@ -3668,6 +3742,30 @@
+     rect.right = (LONG)right; rect.bottom = (LONG)bottom;
+     return rect;
+ }
++
++/* A batch containing only clears requires no vertex pipeline. Mixed draw/
++ * clear batches retain their one ordered VP loop below. */
++static void temporal_render_clear_only(u32 draw, D3D12_CPU_DESCRIPTOR_HANDLE display_rtv)
++{
++    const D3D12DrawRecord* dr = &s_d3d.draws[draw];
++    if (!dr->is_clear) temporal_abort(draw, -1, "non-clear in clear-only replay");
++    if (!(dr->surface_meta.clear_flags & 0xF0u)) return;
++    temporal_before_op(draw);
++    if (s_rt_plan[draw].display_target) s_had_direct_backbuffer = 1;
++    for (int member = 0; member < 4; ++member) {
++        int slot = s_rt_plan[draw].target[member];
++        if (slot < 0) continue;
++        int display = !member && s_rt_plan[draw].display_target;
++        u32 width = display ? s_display_bridge.width : s_d3d.off_rt[slot].w;
++        u32 height = display ? s_display_bridge.height : s_d3d.off_rt[slot].h;
++        D3D12_RECT rect = temporal_clear_rect(dr, width, height);
++        if (rect.left == rect.right || rect.top == rect.bottom) continue;
++        D3D12_CPU_DESCRIPTOR_HANDLE rtv = display ? display_rtv : off_rt_rtv(slot);
++        s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list, rtv, dr->cc, 1, &rect);
++    }
++    temporal_after_op(draw);
++}
++
+ 
+ /* Set by the present entry point: 1 = this batch ends with a swapchain
+  * Present, 0 = execute the recorded draws only. An OFFSCREEN-only batch (a
+@@ -3802,7 +3900,6 @@
+ static u32 s_composite_src = 0;
+ static int s_last_drawn_slot = -1;
+ static u32 s_last_drawn_off  = 0;
+-static int s_had_direct_backbuffer = 0;
+ 
+ void rsx_d3d12_composite_from_offscreen(u32 raw_off) { s_composite_src = raw_off; }
+ 
+@@ -3956,6 +4053,10 @@
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+     u32 fi = s_d3d.frame_index;
++    int temporal_clear_only = s_d3d.draw_count != 0;
++    for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; ++d)
++        if (!s_d3d.draws[d].is_clear) { temporal_clear_only = 0; break; }
++
+ 
+     /* Drain the GPU before touching shared upload resources (vp_vb vertices,
+      * vp_cb constants, per-frame texture staging): the previous frame's draws
+@@ -4348,14 +4449,7 @@
+                     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                 continue;
+             }
+-            if (s_rt_plan[_d].feedback_mask & (1u << _u)) {
+-                int rt = dr->tex_rt[_u];
+-                if (rt < 0 || (u32)rt >= 32 || !s_feedback.slots[rt].resource)
+-                    temporal_abort(_d, _u, "missing feedback descriptor resource");
+-                srv_write(wslot, s_feedback.slots[rt].resource,
+-                    DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+-                continue;
+-            }
++            if (temporal_bind_target_texture(_d, _u, wslot)) continue;
+             /* SCREEN_AS_TEX=1 is a diagnostic substitution. Matching dimensions
+              * alone do not identify the producer of a guest texture (a Bink
+              * luma plane can have the same dimensions as the display). */
+@@ -4396,12 +4490,6 @@
+                 }
+             }
+             if (dr->tex[_u].set) {
+-                int rt = dr->tex_rt[_u];
+-                if (rt >= 0 && (u32)rt < s_off_rt_count && s_d3d.off_rt[rt].res) {
+-                    srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+-                    continue;
+-                }
+                 u32 _bf = dr->tex[_u].fmt & 0x9F;
+                 if (dr->tex[_u].off &&
+                     (_bf == 0x81 || _bf == 0x85 || _bf == 0x8B ||
+@@ -4451,6 +4539,11 @@
+     memcpy(s_pending_rt_views, s_off_rt_views, sizeof(s_off_rt_views));
+     s_pending_rt_epoch = s_off_rt_epoch;
+     s_temporal_pending = 1;
++    s_display_bridge.command_list = s_d3d.cmd_list;
++    s_display_bridge.display = s_d3d.render_targets[fi];
++    s_display_bridge.width = s_d3d.width;
++    s_display_bridge.height = s_d3d.height;
++    s_display_bridge.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+ 
+     /* Transition render target to RENDER_TARGET state */
+     D3D12_RESOURCE_BARRIER barrier = {0};
+@@ -4567,7 +4660,7 @@
+         if (draws > MAX_DRAWS) draws = MAX_DRAWS;
+         for (u32 d = 0; d < draws; d++) {
+             const D3D12DrawRecord* dr = &s_d3d.draws[d];
+-            if (!dr->is_clear && dr->rt_off == 0) s_had_direct_backbuffer = 1;
++            if (s_rt_plan[d].display_target) s_had_direct_backbuffer = 1;
+             if (dr->is_vp) continue; /* drawn by the VP pass below */
+ 
+             /* Select PSO: textured triangles (dbgfont) use the atlas PSO;
+@@ -4597,9 +4690,14 @@
+         }
+     }
+ 
++    if (temporal_clear_only) {
++        for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; ++d)
++            temporal_render_clear_only(d, rtv_handle);
++    }
++
+     /* VP pass: real decompiled vertex program + atlas alpha-test PS. Feeds raw
+      * float4 attrib0 from vp_vb and the vp_c[] constant bank. */
+-    if (s_d3d.vp_ready && s_d3d.draw_count > 0) {
++    if (!temporal_clear_only && s_d3d.vp_ready && s_d3d.draw_count > 0) {
+         int any = 0;
+         for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++)
+             if (s_d3d.draws[d].is_vp) { any = 1; break; }
+@@ -4650,7 +4748,7 @@
+                 if (!dr->is_vp) continue;
+                 if (dr->is_clear && !(dr->surface_meta.clear_flags & 0xF0u)) continue;
+                 temporal_before_op(d);
+-                if (!dr->is_clear && dr->rt_off == 0) s_had_direct_backbuffer = 1;
++                if (s_rt_plan[d].display_target) s_had_direct_backbuffer = 1;
+                 /* The reduced-viewport passes (this title's reflection, drawn
+                  * into a region of the same target) finish here -- snapshot
+                  * before the full-screen scene overwrites them. */
+@@ -4670,7 +4768,7 @@
+                 }
+                 /* Render-to-texture: retarget when this op's surfaces differ.
+                  * Depth is a single shared buffer, so clear it per switch. */
+-                int want = s_rt_plan[d].target[0];
++                int want = s_rt_plan[d].display_target ? -1 : s_rt_plan[d].target[0];
+                 if (want < 0 && dr->rt_off) temporal_abort(d, -1, "missing destination plan");
+                 if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off; }
+                 int wantm[3];
+@@ -4796,6 +4894,8 @@
+                  * Any sampled offscreen RT transitions to PSR first (never
+                  * one of the currently-bound colour targets). */
+                 for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
++                    if (!(s_rt_plan[d].texture_mask & (1u << _u)) ||
++                            (s_rt_plan[d].feedback_mask & (1u << _u))) continue;
+                     int rt = dr->tex_rt[_u];
+                     if (rt >= 0 && rt != cur_rt &&
+                         rt != cur_m[0] && rt != cur_m[1] && rt != cur_m[2])
+@@ -5386,7 +5486,7 @@
+      * order, in one command list. Empty batches still present (boot/idle). */
+     int flip_has_display = (s_d3d.draw_count == 0);
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
+-        if (rsx_d3d12_draw_targets_display(s_d3d.draws[_i].rt_off, s_d3d.draws[_i].rt_mrt, s_d3d.draws[_i].is_clear)) {
++        if (rsx_d3d12_color_write_targets_display(s_d3d.draws[_i].rt_off, s_d3d.draws[_i].rt_mrt, s_d3d.draws[_i].is_clear, s_d3d.draws[_i].surface_meta.clear_flags, s_d3d.draws[_i].surface_meta.color_target)) {
+             flip_has_display = 1;
+             break;
+         }
+@@ -5467,6 +5567,13 @@
+             display_rect.right != (LONG)s_d3d.width || display_rect.bottom != (LONG)s_d3d.height)
+         temporal_abort(UINT32_MAX, -1, "unsupported display clear region");
+ 
++    /* Keep this command's immutable state across a possible prior-batch
++     * flush. Its color write is recorded only after that boundary decision. */
++    display_clear.is_vp = 1; display_clear.is_clear = 1; display_clear.tex_slot = -1;
++    display_clear.rt_fmt = s_d3d.current_rsx_state->surface_format;
++    display_clear.rt_w = display_clear.surface_meta.clip_w;
++    display_clear.rt_h = display_clear.surface_meta.clip_h;
++    memcpy(display_clear.cc, cc, sizeof(cc));
+     memcpy(s_d3d.clear_color, cc, sizeof(cc));
+ 
+     /* A DISPLAY clear marks the start of a new visible frame. If a completed
+@@ -5483,7 +5590,7 @@
+             break;
+         }
+     if (!have_display_draws)
+-        return;   /* keep accumulating the in-progress frame */
++        goto record_display_clear;   /* keep accumulating the in-progress frame */
+ 
+     /* A title that DOUBLE-BUFFERS the display (DeferredShading clears both
+      * 0x0 and 0x440000 per frame, plus a HUD pass) issues several display
+@@ -5502,7 +5609,7 @@
+         unsigned fc = cellGcm_flip_request_count();
+         if (fc != 0) {
+             if (fc == s_last_present_flip)
+-                return;   /* no flip since last present -> not a real boundary */
++                goto record_display_clear;   /* no flip since last present -> not a real boundary */
+             /* A double-buffered title issues several display clears per flip
+              * (DeferredShading: clear back-buffer, HUD pass, ...). They can
+              * arrive in either order, so a small batch here may be an
+@@ -5513,7 +5620,7 @@
+              * the last, which a leaked tiny batch would poison), so it
+              * self-scales per title with no fixed threshold. */
+             if (s_frame_draws_max > 16 && s_d3d.draw_count < s_frame_draws_max / 4)
+-                return;   /* intermediate: keep accumulating, flip stays pending */
++                goto record_display_clear;   /* intermediate: keep accumulating, flip stays pending */
+             clear_flip = fc;
+         }
+     }
+@@ -5525,7 +5632,7 @@
+      * one, a wall in the next -- which makes a single model impossible to see. */
+     { static int accum = -1;
+       if (accum < 0) { const char* e = getenv("RSX_ACCUM_FRAME"); accum = e ? atoi(e) : 0; }
+-      if (accum) return; }
++      if (accum) goto record_display_clear; }
+     if (s_d3d.initialized) {
+         if (blink_dbg())
+             printf("[CLEAR] presenting %u accumulated draws at frame boundary\n",
+@@ -5539,6 +5646,10 @@
+     vp_vs_release_pins();
+     s_d3d.vb_offset    = 0;
+     s_d3d.vp_vb_offset = 0;
++record_display_clear:
++    if (s_d3d.draw_count >= MAX_DRAWS)
++        temporal_abort(UINT32_MAX, -1, "display clear exceeds record capacity");
++    s_d3d.draws[s_d3d.draw_count++] = display_clear;
+ }
+ 
+ static void d3d12_set_render_target(void* ud, const rsx_state* state)
+@@ -7047,7 +7158,7 @@
+     static int s_seen_content = 0;
+     int has_display = (s_d3d.draw_count == 0 && !s_seen_content);
+     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
+-        if (rsx_d3d12_draw_targets_display(s_d3d.draws[_i].rt_off, s_d3d.draws[_i].rt_mrt, s_d3d.draws[_i].is_clear)) {
++        if (rsx_d3d12_color_write_targets_display(s_d3d.draws[_i].rt_off, s_d3d.draws[_i].rt_mrt, s_d3d.draws[_i].is_clear, s_d3d.draws[_i].surface_meta.clear_flags, s_d3d.draws[_i].surface_meta.color_target)) {
+             has_display = 1;
+             break;
+         }
+diff --git a/libs/video/rsx_d3d12_backend.h b/libs/video/rsx_d3d12_backend.h
+--- a/libs/video/rsx_d3d12_backend.h
++++ b/libs/video/rsx_d3d12_backend.h
+@@ -82,6 +82,15 @@
+     return rsx_d3d12_draw_targets_display_ext(rt_off, rt_mrt, is_clear, 0);
+ }
+ 
++/* Presentation gates accept a real display color clear. The frame-boundary
++ * heuristic above still asks specifically for draws and excludes clears. */
++static inline int rsx_d3d12_color_write_targets_display(u32 rt_off,
++        const u32 rt_mrt[3], int is_clear, u32 clear_flags, u32 color_target)
++{
++    if (is_clear && !(clear_flags & 0xF0u)) return 0;
++    return rsx_d3d12_draw_targets_display_ext(rt_off, rt_mrt, 0, color_target);
++}
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libs/video/rsx_d3d12_display_bridge.h b/libs/video/rsx_d3d12_display_bridge.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_d3d12_display_bridge.h
+@@ -0,0 +1,129 @@
++#ifndef RSX_D3D12_DISPLAY_BRIDGE_H
++#define RSX_D3D12_DISPLAY_BRIDGE_H
++
++#include "rsx_d3d12_linear_copy.h"
++
++/* Both resources are borrowed and must outlive the submitted command list's
++ * fence. Display is RENDER_TARGET on entry and return; its caller owns that
++ * invariant. The canonical state pointer belongs to the pending batch. */
++typedef struct rsx_d3d12_display_bridge_context {
++    ID3D12GraphicsCommandList* command_list;
++    ID3D12Resource* display;
++    uint32_t width, height;
++    DXGI_FORMAT format;
++    HRESULT last_hr;
++    const char* last_error;
++} rsx_d3d12_display_bridge_context;
++
++static inline int rsx_d3d12_display_bridge_fail(
++        rsx_d3d12_display_bridge_context* context, const char* stage)
++{
++    if (context) {
++        context->last_hr = E_INVALIDARG;
++        context->last_error = stage;
++    }
++    return 0;
++}
++
++static inline int rsx_d3d12_display_bridge_description_valid(
++        ID3D12Resource* resource, uint32_t width, uint32_t height, DXGI_FORMAT format)
++{
++    D3D12_RESOURCE_DESC desc;
++    resource->lpVtbl->GetDesc(resource, &desc);
++    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
++           desc.Width == width && desc.Height == height &&
++           desc.DepthOrArraySize == 1 && desc.MipLevels == 1 &&
++           desc.Format == format && desc.SampleDesc.Count == 1 &&
++           desc.SampleDesc.Quality == 0;
++}
++
++/* Record a complete copy only after both resources and the canonical tracker
++ * have been validated. There is no allocation, descriptor or epoch here.
++ * Recording commands has no HRESULT; a later failure requires discarding the
++ * complete pending command list, as for the other temporal copy adapters. */
++static inline int rsx_d3d12_display_bridge_copy(
++        rsx_d3d12_display_bridge_context* context,
++        const rsx_d3d12_linear_resource* canonical, int to_display)
++{
++    if (!context || !context->command_list || !context->display || !canonical ||
++            !canonical->resource || !canonical->state ||
++            canonical->resource == context->display ||
++            !context->width || !context->height ||
++            context->width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
++            context->height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
++            context->format != DXGI_FORMAT_R8G8B8A8_UNORM ||
++            canonical->format != context->format ||
++            !rsx_linear_view_valid(&canonical->view) ||
++            canonical->view.width != context->width ||
++            canonical->view.height != context->height ||
++            canonical->view.bytes_per_pixel != 4 || canonical->view.format_id != 0x85)
++        return rsx_d3d12_display_bridge_fail(context,
++                to_display ? "display.begin.input" : "display.end.input");
++    if (!rsx_d3d12_display_bridge_description_valid(canonical->resource,
++            context->width, context->height, context->format))
++        return rsx_d3d12_display_bridge_fail(context,
++                to_display ? "display.begin.canonical" : "display.end.canonical");
++    if (!rsx_d3d12_display_bridge_description_valid(context->display,
++            context->width, context->height, context->format))
++        return rsx_d3d12_display_bridge_fail(context,
++                to_display ? "display.begin.display" : "display.end.display");
++
++    D3D12_RESOURCE_STATES canonical_copy = to_display ?
++        D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
++    D3D12_RESOURCE_STATES display_copy = to_display ?
++        D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COPY_SOURCE;
++    D3D12_RESOURCE_BARRIER barriers[2];
++    UINT count = 0;
++    memset(barriers, 0, sizeof(barriers));
++    if (*canonical->state != canonical_copy) {
++        D3D12_RESOURCE_BARRIER* barrier = &barriers[count++];
++        barrier->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        barrier->Transition.pResource = canonical->resource;
++        barrier->Transition.StateBefore = *canonical->state;
++        barrier->Transition.StateAfter = canonical_copy;
++        barrier->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    }
++    D3D12_RESOURCE_BARRIER* display_barrier = &barriers[count++];
++    display_barrier->Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    display_barrier->Transition.pResource = context->display;
++    display_barrier->Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    display_barrier->Transition.StateAfter = display_copy;
++    display_barrier->Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    context->command_list->lpVtbl->ResourceBarrier(context->command_list, count, barriers);
++    *canonical->state = canonical_copy;
++
++    context->command_list->lpVtbl->CopyResource(context->command_list,
++            to_display ? context->display : canonical->resource,
++            to_display ? canonical->resource : context->display);
++
++    memset(&barriers[0], 0, sizeof(barriers[0]));
++    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    barriers[0].Transition.pResource = context->display;
++    barriers[0].Transition.StateBefore = display_copy;
++    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    context->command_list->lpVtbl->ResourceBarrier(context->command_list, 1, barriers);
++    context->last_hr = S_OK;
++    context->last_error = NULL;
++    return 1;
++}
++
++/* Preserve the entire canonical view before a partial display draw/clear.
++ * Canonical finishes COPY_SOURCE; display finishes RENDER_TARGET. */
++static inline int rsx_d3d12_display_bridge_begin(
++        rsx_d3d12_display_bridge_context* context,
++        const rsx_d3d12_linear_resource* canonical)
++{
++    return rsx_d3d12_display_bridge_copy(context, canonical, 1);
++}
++
++/* Make the display write visible in canonical storage before publication.
++ * Canonical finishes COPY_DEST; display finishes RENDER_TARGET. */
++static inline int rsx_d3d12_display_bridge_end(
++        rsx_d3d12_display_bridge_context* context,
++        const rsx_d3d12_linear_resource* canonical)
++{
++    return rsx_d3d12_display_bridge_copy(context, canonical, 0);
++}
++
++#endif
+diff --git a/libs/video/rsx_d3d12_temporal_plan.h b/libs/video/rsx_d3d12_temporal_plan.h
+--- a/libs/video/rsx_d3d12_temporal_plan.h
++++ b/libs/video/rsx_d3d12_temporal_plan.h
+@@ -11,6 +11,7 @@
+     int target[4];
+     u32 texture_mask;
+     u32 feedback_mask;
++    u32 display_target;
+ } s_rt_plan[MAX_DRAWS];
+ static const char* s_temporal_error;
+ static u32 s_temporal_error_op;
+@@ -52,6 +53,7 @@
+         for (member = 0; member < 4; ++member) s_rt_plan[op].target[member] = -1;
+         s_rt_plan[op].texture_mask = 0;
+         s_rt_plan[op].feedback_mask = 0;
++        s_rt_plan[op].display_target = 0;
+     }
+     if (s_d3d.draw_count > MAX_DRAWS)
+         return temporal_plan_fail("draw count exceeds temporal plan capacity", 0, -1);
+@@ -65,19 +67,26 @@
+     for (op = 0; op < s_d3d.draw_count; ++op) {
+         const D3D12DrawRecord* dr = &s_d3d.draws[op];
+         int member;
++        if (!dr->is_clear && !dr->is_vp)
++            return temporal_plan_fail("legacy draw is unsupported by ordered temporal replay", op, -1);
+         if (dr->is_clear) {
+             u32 color_flags = dr->surface_meta.clear_flags & 0xF0u;
+             if (!color_flags) continue;
+             if (color_flags != 0xF0u)
+                 return temporal_plan_fail("partial color clear is unsupported", op, -1);
+         }
+-        for (member = 0; member < 4; ++member) {
++        int target_count = rsx_declared_surface_target_count(&dr->surface_meta);
++        if (target_count < 1)
++            return temporal_plan_fail("unsupported or missing color target selection", op, -1);
++        s_rt_plan[op].display_target = dr->rt_off == 0;
++        for (member = 0; member < target_count; ++member) {
+             u32 raw = member ? dr->rt_mrt[member - 1] : dr->rt_off;
+             u32 declared_member = member ? (u32)member :
+                 (dr->surface_meta.color_target == 2 ? 1u : 0u);
+             rsx_linear_view view;
+             int slot;
+-            if (!raw) continue;
++            if (!member && s_rt_plan[op].display_target)
++                raw = dr->surface_meta.color_offset[declared_member];
+             if (rsx_declared_surface_linear(&dr->surface_meta, dr->rt_fmt,
+                     declared_member, &view) != RSX_LINEAR_META_OK)
+                 return temporal_plan_fail("unsupported or missing render-target metadata", op, -1);
+diff --git a/libs/video/rsx_d3d12_temporal_replay.h b/libs/video/rsx_d3d12_temporal_replay.h
+--- a/libs/video/rsx_d3d12_temporal_replay.h
++++ b/libs/video/rsx_d3d12_temporal_replay.h
+@@ -29,6 +29,9 @@
+         if (slot < -1 || (slot >= 0 && (u32)slot >= s_off_rt_count))
+             temporal_abort(draw, -1, "invalid temporal destination identity");
+     }
++    if (s_rt_plan[draw].display_target > 1 ||
++            (s_rt_plan[draw].display_target && s_rt_plan[draw].target[0] < 0))
++        temporal_abort(draw, -1, "invalid display target plan");
+     for (int unit = 0; unit < 16; ++unit) {
+         if (!(s_rt_plan[draw].texture_mask & (1u << unit))) continue;
+         int slot = s_d3d.draws[draw].tex_rt[unit];
+@@ -94,6 +97,7 @@
+     for (int member = 0; member < 4; ++member)
+         temporal_materialize(s_rt_plan[draw].target[member], draw);
+     temporal_snapshot_feedback(draw);
++    temporal_display_before(draw);
+     for (int unit = 0; unit < 16; ++unit) {
+         if (!(s_rt_plan[draw].texture_mask & (1u << unit))) continue;
+         int slot = s_d3d.draws[draw].tex_rt[unit];
+@@ -109,6 +113,7 @@
+ static void temporal_after_op(u32 draw)
+ {
+     temporal_validate_record(draw);
++    temporal_display_after(draw);
+     ++s_pending_rt_epoch;
+     for (int member = 0; member < 4; ++member) {
+         int slot = s_rt_plan[draw].target[member];
+diff --git a/libs/video/rsx_linear_metadata.h b/libs/video/rsx_linear_metadata.h
+--- a/libs/video/rsx_linear_metadata.h
++++ b/libs/video/rsx_linear_metadata.h
+@@ -11,6 +11,21 @@
+     RSX_LINEAR_META_UNSUPPORTED = -12,
+     RSX_LINEAR_META_INVALID = -13
+ };
++
++/* Active members come from the selector, not their addresses. Address zero
++ * is valid guest storage and must not shorten an MRT prefix. */
++static inline int rsx_declared_surface_target_count(const rsx_d3d12_surface_metadata* m)
++{
++    if (!m || !m->valid) return RSX_LINEAR_META_ABSENT;
++    switch (m->color_target) {
++    case CELL_GCM_SURFACE_TARGET_0:
++    case CELL_GCM_SURFACE_TARGET_1: return 1;
++    case CELL_GCM_SURFACE_TARGET_MRT1: return 2;
++    case CELL_GCM_SURFACE_TARGET_MRT2: return 3;
++    case CELL_GCM_SURFACE_TARGET_MRT3: return 4;
++    default: return RSX_LINEAR_META_UNSUPPORTED;
++    }
++}
+ 
+ /* Decode declared linear RGBA8 geometry only. Tile/compression state, CPU
+  * writes, GPU seed bounds and resource ownership require separate validation.

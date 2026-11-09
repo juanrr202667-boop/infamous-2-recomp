@@ -1,0 +1,47 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 5fb9231..bca68d7 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -641,7 +641,7 @@ static void audio_mix_one_block(void)
+                 left = right = ld_be_f32(&src[s]) * level;
+             }
+ 
+-            /* If 7.1, mix center and other channels into stereo */
++            /* If 7.1, mix center and other channels into stereo with headroom */
+             if (nch == 8) {
+                 float center = ld_be_f32(&src[s * 8 + 2]) * level * 0.707f;
+                 float lfe    = ld_be_f32(&src[s * 8 + 3]) * level * 0.5f;
+@@ -649,8 +649,9 @@ static void audio_mix_one_block(void)
+                 float rr     = ld_be_f32(&src[s * 8 + 5]) * level * 0.5f;
+                 float sl     = ld_be_f32(&src[s * 8 + 6]) * level * 0.3f;
+                 float sr     = ld_be_f32(&src[s * 8 + 7]) * level * 0.3f;
+-                left  += center + lfe + rl + sl;
+-                right += center + lfe + rr + sr;
++                const float downmix_scale = 1.0f / (1.0f + 0.707f + 0.5f + 0.5f + 0.3f);
++                left  = (left  + center + lfe + rl + sl) * downmix_scale;
++                right = (right + center + lfe + rr + sr) * downmix_scale;
+             }
+ 
+             s_mix_buffer[s * 2 + 0] += left;
+@@ -918,8 +919,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+     if (!param_ea || !portNum_ea)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
+-    u64 nch  = vm_read64(param_ea + 0);   /* nChannel */
+-    u64 nblk = vm_read64(param_ea + 8);   /* nBlock   */
++    u64 nch     = vm_read64(param_ea + 0);   /* nChannel */
++    u64 nblk    = vm_read64(param_ea + 8);   /* nBlock   */
++    u64 attr    = vm_read64(param_ea + 16);  /* attr     */
++    float level = vm_read_f32(param_ea + 24); /* level    */
+     printf("[cellAudio] PortOpen(nChannel=%llu, nBlock=%llu)\n",
+            (unsigned long long)nch, (unsigned long long)nblk);
+ 
+@@ -951,6 +954,8 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+     memset(&port->param, 0, sizeof(port->param));
+     port->param.nChannel = nch;
+     port->param.nBlock   = nblk;
++    port->param.attr     = attr;
++    port->param.level    = level;
+     port->read_index  = 0;
+     port->write_index = 0;
+ 

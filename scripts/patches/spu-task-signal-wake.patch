@@ -1,0 +1,194 @@
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -94,6 +94,9 @@
+  * released. cellSpurs sets it so a PPU blocked in cellSpursEventFlagWait wakes
+  * when a task sets the flag, instead of on its next 2 ms poll. */
+ void (*g_spu_line_commit_hook)(uint32_t line) = 0;
++/* Separate host condition channel used by real SPU WAIT_SIGNAL sleepers. */
++void spu_taskset_line_committed(uint32_t line, const spu_context* producer,
++                               uint32_t command);
+ /* SPU_LS_WATCH=0x1BE80[,0x927D80...]: watch up to 4 16-byte LS lines (reads
+  * and writes) in every SPU image. See spu_ls_watch_hit2 for the fast path. */
+ #define SPU_WATCH_MAX 4
+@@ -796,7 +799,10 @@
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK, ea); }
+         ctx->resv_valid = 0;                           /* reservation consumed */
+         spu_lockline_unlock();
+-        if (ctx->atomic_stat == 0 && g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
++        if (ctx->atomic_stat == 0) {
++            spu_taskset_line_committed(ea & ~127u, ctx, cmd);
++            if (g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
++        }
+         return 1;
+ 
+     case MFC_PUTLLUC_CMD:
+@@ -813,6 +819,7 @@
+         spu_coh_notify_write(ea);
+         ctx->resv_valid = 0; ctx->atomic_stat = 2;   /* PUTLLUC complete */
+         spu_lockline_unlock();
++        spu_taskset_line_committed(ea & ~127u, ctx, cmd);
+         if (g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
+         return 1;
+ 
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -886,6 +886,103 @@
+ static pthread_cond_t  s_sig_cv   = PTHREAD_COND_INITIALIZER;
+ #endif
+ 
++/* Actual WAIT_SIGNAL sleepers, protected by s_sig_lock. A node lives on the
++ * waiting thread's stack until it consumes a signal or leaves the wait. The
++ * older parked-object hints below are not an authoritative waiter registry. */
++typedef struct spu_signal_waiter {
++    uint32_t taskset, task, line;
++    struct spu_signal_waiter* next;
++} spu_signal_waiter;
++static spu_signal_waiter* s_signal_waiters;
++
++/* Lock order: signal lock -> lock-line lock. The SPU commit notifier is called
++ * only AFTER releasing lock-line. Test-and-consume is one transaction against
++ * SPU atomic memcpy, so clearing one task cannot overwrite a peer's signal. */
++static int spu_task_signal_update(uint32_t taskset, uint32_t task, int set)
++{
++    uint32_t ea = taskset + CSTS_SIGNALLED + (task / 32u) * 4u;
++    uint32_t mask = 0x80000000u >> (task % 32u);
++    spu_lockline_lock();
++    uint32_t bits = vm_read32(ea);
++    int pending = (bits & mask) != 0;
++    uint32_t value = set ? bits | mask : bits & ~mask;
++    if (set || pending) {
++        uint32_t raw = ps3_bswap32(value);
++        memcpy(vm_ptr8(ea), &raw, sizeof(raw));
++        spu_coh_notify_write(ea);
++    }
++    spu_lockline_unlock();
++    if (set || pending) {
++        PS3_WW_CHECK(ea, value, 4);
++        if (g_resv_store_active > 0) ppu_resv_break_store(ea);
++    }
++    return pending;
++}
++
++static void spu_signal_waiter_remove(spu_signal_waiter* waiter)
++{
++    spu_signal_waiter** link = &s_signal_waiters;
++    while (*link != waiter) link = &(*link)->next;
++    *link = waiter->next;
++}
++
++/* Notify committed guest state, never invent a signal bit. A commit before
++ * registration is latched in guest memory; a later commit takes the lock that
++ * the condition wait atomically releases, preventing a lost host wake. */
++void spu_taskset_line_committed(uint32_t line, const spu_context* producer,
++                               uint32_t command)
++{
++    struct wake_record { uint32_t taskset, task, pc, pending; int image; } records[8];
++    unsigned count = 0;
++    int matched = 0, cap = 0;
++    static int trace = -1;
++    static unsigned traced;
++#ifdef _WIN32
++    AcquireSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_lock(&s_sig_lock);
++#endif
++    if (trace < 0) {
++        const char* e = getenv("SPU_TASK_WAKE_TRACE");
++        trace = e && *e && strcmp(e, "0") != 0;
++    }
++    for (spu_signal_waiter* w = s_signal_waiters; w; w = w->next) {
++        if (w->line != line) continue;
++        matched = 1;
++        if (trace && traced < 8) {
++            uint32_t ea = w->taskset + CSTS_SIGNALLED + (w->task / 32u) * 4u;
++            spu_lockline_lock();
++            uint32_t bits = vm_read32(ea);
++            spu_lockline_unlock();
++            records[count].taskset = w->taskset;
++            records[count].task = w->task;
++            records[count].pending = (bits & (0x80000000u >> (w->task % 32u))) != 0;
++            records[count].image = producer->image_id;
++            records[count].pc = producer->pc;
++            ++count;
++            if (++traced == 8) cap = 1;
++        }
++    }
++    if (matched) {
++#ifdef _WIN32
++        WakeAllConditionVariable(&s_sig_cv);
++#else
++        pthread_cond_broadcast(&s_sig_cv);
++#endif
++    }
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&s_sig_lock);
++#else
++    pthread_mutex_unlock(&s_sig_lock);
++#endif
++    for (unsigned i = 0; i < count; ++i)
++        fprintf(stderr, "[spu-task-wake] image=%d pc=0x%05X cmd=0x%02X line=0x%08X "
++                "taskset=0x%08X task=%u pending_snapshot=%u\n",
++                records[i].image, records[i].pc, command, line,
++                records[i].taskset, records[i].task, records[i].pending);
++    if (cap) fprintf(stderr, "[spu-task-wake] trace_cap=8\n");
++}
++
+ /* Which (taskset, task) pairs are currently parked in WAIT_SIGNAL.
+  *
+  * A PPU->SPU event-flag Set must be able to reach a task that parked WITHOUT
+@@ -1004,12 +1101,12 @@
+     if (!taskset_ea || taskId >= 128) return;
+ #ifdef _WIN32
+     AcquireSRWLockExclusive(&s_sig_lock);
+-    spurs_bitset_set(taskset_ea + CSTS_SIGNALLED, taskId);
++    spu_task_signal_update(taskset_ea, taskId, 1);
+     WakeAllConditionVariable(&s_sig_cv);
+     ReleaseSRWLockExclusive(&s_sig_lock);
+ #else
+     pthread_mutex_lock(&s_sig_lock);
+-    spurs_bitset_set(taskset_ea + CSTS_SIGNALLED, taskId);
++    spu_task_signal_update(taskset_ea, taskId, 1);
+     pthread_cond_broadcast(&s_sig_cv);
+     pthread_mutex_unlock(&s_sig_lock);
+ #endif
+@@ -1098,10 +1195,14 @@
+     int drained = 0;
+     /* Release the global SPU-serial lock while parked so another SPU task can
+      * run (and possibly signal us); re-acquired before returning to resume. */
++    spu_signal_waiter waiter = {taskset_ea, taskId,
++        (taskset_ea + CSTS_SIGNALLED + (taskId / 32u) * 4u) & ~127u, NULL};
+     spu_serial_release();
+ #ifdef _WIN32
+     AcquireSRWLockExclusive(&s_sig_lock);
+-    while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++    waiter.next = s_signal_waiters;
++    s_signal_waiters = &waiter;
++    while (!spu_task_signal_update(taskset_ea, taskId, 0)) {
+         if (!SleepConditionVariableSRW(&s_sig_cv, &s_sig_lock, 1000, 0)) {
+             static int _n = 0;
+             if (++secs && _n < 16) { _n++;
+@@ -1110,11 +1211,13 @@
+             if (drain && secs >= drain) { drained = 1; break; }
+         }
+     }
+-    if (!drained) spurs_bitset_clear(taskset_ea + CSTS_SIGNALLED, taskId);
++    spu_signal_waiter_remove(&waiter);
+     ReleaseSRWLockExclusive(&s_sig_lock);
+ #else
+     pthread_mutex_lock(&s_sig_lock);
+-    while (!spurs_bitset_test(taskset_ea + CSTS_SIGNALLED, taskId)) {
++    waiter.next = s_signal_waiters;
++    s_signal_waiters = &waiter;
++    while (!spu_task_signal_update(taskset_ea, taskId, 0)) {
+         struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 1;
+         if (pthread_cond_timedwait(&s_sig_cv, &s_sig_lock, &ts) != 0) {
+             static int _n = 0;
+@@ -1124,7 +1227,7 @@
+             if (drain && secs >= drain) { drained = 1; break; }
+         }
+     }
+-    if (!drained) spurs_bitset_clear(taskset_ea + CSTS_SIGNALLED, taskId);
++    spu_signal_waiter_remove(&waiter);
+     pthread_mutex_unlock(&s_sig_lock);
+ #endif
+     if (drained) { static int _d = 0; if (_d++ < 24)

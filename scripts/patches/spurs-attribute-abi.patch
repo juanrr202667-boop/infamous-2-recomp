@@ -1,0 +1,23 @@
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -549,12 +549,14 @@
+     return CELL_OK;
+ }
+ 
+-/* The SDK's cellSpursAttributeInitialize() macro imports this internal name
+- * (NID 0x95180230). Forward to the implementation above. */
+-s32 _cellSpursAttributeInitialize(CellSpursAttribute* attr, s32 nSpus,
+-                                  s32 spuPriority, s32 ppuPriority,
+-                                  u8 exitIfNoWork)
+-{
++/* Internal SDK export (NID 0x95180230): revision and SDK version precede
++ * the public initializer arguments. Based on ps3recomp PR #310. */
++s32 _cellSpursAttributeInitialize(CellSpursAttribute* attr, u32 revision,
++                                  u32 sdkVersion, s32 nSpus, s32 spuPriority,
++                                  s32 ppuPriority, u8 exitIfNoWork)
++{
++    (void)revision;
++    (void)sdkVersion;
+     return cellSpursAttributeInitialize(attr, nSpus, spuPriority,
+                                         ppuPriority, exitIfNoWork);
+ }

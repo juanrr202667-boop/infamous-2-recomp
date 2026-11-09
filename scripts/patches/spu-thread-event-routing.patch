@@ -1,0 +1,24 @@
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -1719,8 +1719,19 @@
+             queue = spurs_port_queue(port);
+         } else {
+             AcquireSRWLockShared(&s_spu_port_lock);
+-            spu_group_t* group = spu_find_group(spu->spu_group_id);
+-            if (group) queue = group->user_event_ports[port];
++            /* connect_event binds a port to one thread; all_threads is the
++             * fallback for that exact port, never an unrelated default queue. */
++            spu_thread_t* thread = spu_find_thread(spu->spu_id);
++            if (thread && thread->group_id == spu->spu_group_id) {
++                for (int i = 0; i < thread->evt_bind_n; ++i)
++                    if (thread->evt_bind[i].spup == port) {
++                        queue = thread->evt_bind[i].queue; break;
++                    }
++            }
++            if (!queue) {
++                spu_group_t* group = spu_find_group(spu->spu_group_id);
++                if (group) queue = group->user_event_ports[port];
++            }
+             ReleaseSRWLockShared(&s_spu_port_lock);
+         }
+         result = CELL_ENOTCONN;

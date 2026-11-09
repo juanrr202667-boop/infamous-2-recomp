@@ -1,0 +1,616 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -367,6 +367,7 @@
+ static u64 s_off_rt_epoch, s_pending_rt_epoch;
+ static int s_temporal_pending;
+ static ID3D12PipelineState* s_temporal_pso[MAX_DRAWS];
++static unsigned char s_temporal_guest_fp[MAX_DRAWS];
+ 
+ char g_rsx_title_base[128] = "ps3recomp";
+ static u32 s_dbg_last_draws = 0;
+@@ -1516,6 +1517,11 @@
+             if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].used)
+                 fprintf(mf, "offrt[%d] off=0x%08X %ux%u dxgi=%u\n", i, s_d3d.off_rt[i].off,
+                         s_d3d.off_rt[i].w, s_d3d.off_rt[i].h, s_d3d.off_rt[i].dxgi);
++        for (u32 i = 0; i < s_off_rt_count; ++i)
++            if (s_d3d.off_rt[i].used)
++                fprintf(mf, "view[%u] pitch=%u location=%u epoch=%llu\n", i,
++                    s_off_rt_views[i].view.pitch, s_off_rt_views[i].view.location,
++                    (unsigned long long)s_off_rt_views[i].complete_at);
+         fprintf(mf, "--- ops ---\n");
+         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; d++) {
+             const D3D12DrawRecord* r = &s_d3d.draws[d];
+@@ -1589,7 +1595,7 @@
+     for (int i = 0; i < MAX_OFF_RTS; i++) {
+         OffRT* r = &s_d3d.off_rt[i];
+         if (!r->res || !r->used) continue;
+-        snprintf(path, sizeof path, "%s/rt_%08X.bmp", dir, r->off);
++        snprintf(path, sizeof path, "%s/rt_%08X_view%02d_%ux%u.bmp", dir, r->off, i, r->w, r->h);
+         cap_readback_write(r->res, r->w, r->h, r->dxgi, r->st, fi, path);
+     }
+     printf("[RSXCAP] frame %llu -> %s (%u ops)\n",
+@@ -3438,9 +3444,9 @@
+ {
+     if (!out) return;
+     if (draw < MAX_DRAWS) {
+-        fprintf(out, "      temporal_targets=[%d,%d,%d,%d]",
++        fprintf(out, "      temporal_targets=[%d,%d,%d,%d] mask=0x%04X",
+                 s_rt_plan[draw].target[0], s_rt_plan[draw].target[1],
+-                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3]);
++                s_rt_plan[draw].target[2], s_rt_plan[draw].target[3], s_rt_plan[draw].texture_mask);
+         for (int u = 0; u < RSX_MAX_TEXTURES; ++u) {
+             if (s_d3d.draws[draw].tex_rt[u] >= 0) {
+                 fprintf(out, " tex_rt[%d]=%d", u, s_d3d.draws[draw].tex_rt[u]);
+@@ -3498,6 +3504,119 @@
+     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
+     r->st = to;
++}
++
++
++static void temporal_abort(u32 draw, int unit, const char* reason)
++{
++    fprintf(stderr, "[TEMPORAL_FATAL] frame=%llu op=%u unit=%d reason=%s\n",
++        (unsigned long long)s_d3d.frame_count, draw, unit, reason ? reason : "unknown");
++    if (draw < s_d3d.draw_count && draw < MAX_DRAWS) {
++        const D3D12DrawRecord* dr = &s_d3d.draws[draw];
++        fprintf(stderr, "[TEMPORAL_FATAL] rt=0x%08X mrt=0x%X/0x%X/0x%X size=%ux%u fmt=0x%X "
++            "dma_seen=0x%X dma=0x%X/0x%X/0x%X/0x%X clear=0x%X fp=0x%X mask=0x%X\n",
++            dr->rt_off, dr->rt_mrt[0], dr->rt_mrt[1], dr->rt_mrt[2], dr->rt_w, dr->rt_h,
++            dr->rt_fmt, dr->surface_meta.dma_seen, dr->surface_meta.color_dma[0],
++            dr->surface_meta.color_dma[1], dr->surface_meta.color_dma[2],
++            dr->surface_meta.color_dma[3], dr->surface_meta.clear_flags,
++            dr->fp_addr, s_rt_plan[draw].texture_mask);
++        if (unit >= 0 && unit < 16)
++            fprintf(stderr, "[TEMPORAL_FATAL] tex[%d] raw=0x%X size=%ux%u format=0x%X ctrl3=0x%X\n",
++                unit, dr->tex[unit].raw, dr->tex[unit].w, dr->tex[unit].h,
++                dr->tex[unit].format_word, dr->tex[unit].ctrl3);
++    }
++    fflush(stderr); fflush(stdout);
++    /* No partial command list is submitted or reused after a failed plan. */
++    ExitProcess(2);
++}
++
++#include "rsx_d3d12_temporal_replay.h"
++
++static void temporal_release_completed_resources(void)
++{
++    for (u32 d = 0; d < MAX_DRAWS; ++d) {
++        if (s_temporal_pso[d]) {
++            s_temporal_pso[d]->lpVtbl->Release(s_temporal_pso[d]);
++            s_temporal_pso[d] = NULL;
++        }
++    }
++    for (u32 i = 0; i < s_off_rt_count; ++i) {
++        if (s_d3d.off_rt[i].up) {
++            s_d3d.off_rt[i].up->lpVtbl->Release(s_d3d.off_rt[i].up);
++            s_d3d.off_rt[i].up = NULL;
++        }
++    }
++}
++
++static ID3D12PipelineState* temporal_select_pipeline(u32 draw, const D3D12DrawRecord* dr, u32* mask)
++{
++    ID3D12PipelineState* pipeline = dr->fp_addr ? vp_get_fp_pso(dr->vs_idx,
++        dr->fp_addr, dr->blend_key, dr_num_rts(dr),
++        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt) : DXGI_FORMAT_R8G8B8A8_UNORM,
++        dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr), dr->depth_key) : NULL;
++    if (pipeline) {
++        for (u32 i = 0; i < s_d3d.vp_fp_n; ++i)
++            if (s_d3d.vp_fp[i].pso == pipeline) {
++                *mask = s_d3d.vp_fp[i].texture_mask;
++                return pipeline;
++            }
++        *mask = UINT32_MAX;
++        return pipeline;
++    }
++    pipeline = (s_d3d.tex_ready && s_d3d.pipeline_state_vp) ?
++        s_d3d.pipeline_state_vp : s_d3d.pipeline_state_vp_color;
++    if (!pipeline) pipeline = s_d3d.pipeline_state_vp;
++    /* compile_vp creates fixed PSOs: RGBA8, one RT, all color channels,
++     * depth enabled/write/LEQUAL, no blend or cull. Reusing those PSOs for
++     * other captured state would silently change the guest operation. */
++    if (pipeline) {
++        if ((dr->cmask & 0xFu) != 0xFu)
++            temporal_abort(draw, -1, "fixed fallback incompatible: color write mask");
++        if ((dr->depth_key & 3u) != 3u ||
++                gcm_depth_func_d3d((dr->depth_key >> 2) & 0xFFFFu) != D3D12_COMPARISON_FUNC_LESS_EQUAL)
++            temporal_abort(draw, -1, "fixed fallback incompatible: depth state");
++        if ((dr->rt_fmt & 0x1Fu) != 8u)
++            temporal_abort(draw, -1, "fixed fallback incompatible: color format");
++        /* The selector enables MRT members even when their guest offset is 0. */
++        if (!dr->surface_meta.valid ||
++                (dr->surface_meta.color_target != CELL_GCM_SURFACE_TARGET_0 &&
++                 dr->surface_meta.color_target != CELL_GCM_SURFACE_TARGET_1))
++            temporal_abort(draw, -1, "fixed fallback incompatible: color target selection");
++        if (dr->rt_mrt[0] || dr->rt_mrt[1] || dr->rt_mrt[2])
++            temporal_abort(draw, -1, "fixed fallback incompatible: multiple color targets");
++        if (dr->blend_key & 1u)
++            temporal_abort(draw, -1, "fixed fallback incompatible: blending");
++        if (dr->cull & 1u)
++            temporal_abort(draw, -1, "fixed fallback incompatible: culling");
++        if (pipeline == s_d3d.pipeline_state_vp && dr->tex[0].set && dr->tex[0].cube)
++            temporal_abort(draw, -1, "fixed fallback incompatible: cube texture");
++    }
++    /* These are the actual compiled fallback programs: t0 coverage/discard
++     * for the atlas, no texture references for the color-only program. */
++    *mask = pipeline == s_d3d.pipeline_state_vp ? 1u : 0u;
++    return pipeline;
++}
++
++static D3D12_RECT temporal_clear_rect(const D3D12DrawRecord* dr, u32 width, u32 height)
++{
++    const rsx_d3d12_surface_metadata* m = &dr->surface_meta;
++    D3D12_RECT rect = {0, 0, (LONG)width, (LONG)height};
++    if (!m->valid) return rect;
++    u64 left = m->clip_x > m->scissor_x ? m->clip_x : m->scissor_x;
++    u64 top = m->clip_y > m->scissor_y ? m->clip_y : m->scissor_y;
++    u64 right = (u64)m->clip_x + m->clip_w;
++    u64 bottom = (u64)m->clip_y + m->clip_h;
++    const u64 scissor_right = (u64)m->scissor_x + m->scissor_w;
++    const u64 scissor_bottom = (u64)m->scissor_y + m->scissor_h;
++    if (right > scissor_right) right = scissor_right;
++    if (bottom > scissor_bottom) bottom = scissor_bottom;
++    if (right > width) right = width;
++    if (bottom > height) bottom = height;
++    if (left > right) left = right;
++    if (top > bottom) top = bottom;
++    rect.left = (LONG)left; rect.top = (LONG)top;
++    rect.right = (LONG)right; rect.bottom = (LONG)bottom;
++    return rect;
+ }
+ 
+ /* Set by the present entry point: 1 = this batch ends with a swapchain
+@@ -3646,12 +3765,13 @@
+         extern u32 cellGcmGetCurrentDisplayBufferOffset(void);
+         u32 disp_off = cellGcmGetCurrentDisplayBufferOffset();
+         if (disp_off) {
++            const rsx_linear_version* views = s_temporal_pending ? s_pending_rt_views : s_off_rt_views;
+             for (u32 k = 0; k < s_off_rt_count; ++k) {
+-                if (s_off_rt_views[k].view.offset == disp_off &&
+-                    s_off_rt_views[k].view.width == s_d3d.width &&
+-                    s_off_rt_views[k].view.height == s_d3d.height &&
++                if (views[k].view.offset == disp_off &&
++                    views[k].view.width == s_d3d.width &&
++                    views[k].view.height == s_d3d.height &&
+                     s_d3d.off_rt[k].res) {
+-                    if (i < 0 || s_off_rt_views[k].complete_at > s_off_rt_views[i].complete_at)
++                    if (i < 0 || views[k].complete_at > views[i].complete_at)
+                         i = (int)k;
+                 }
+             }
+@@ -3664,6 +3784,7 @@
+         else            { i = off_rt_find(want); }
+     }
+     if (i < 0 || !s_d3d.off_rt[i].res) return;
++    if (s_temporal_pending) temporal_materialize(i, UINT32_MAX);
+     OffRT* r = &s_d3d.off_rt[i];
+     /* Same-format copy only; a half-float source would need a converting draw. */
+     if (r->dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) {
+@@ -3793,6 +3914,11 @@
+      * polygons). These workloads are a few draws/frame, so full serialisation
+      * costs little. */
+     wait_for_gpu();
++    if (s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device) != S_OK ||
++            s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) == UINT64_MAX ||
++            s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[fi])
++        temporal_abort(UINT32_MAX, -1, "previous GPU batch did not complete");
++    temporal_release_completed_resources();
+     flush_deferred_releases();
+     s_had_direct_backbuffer = 0;
+ 
+@@ -4056,12 +4182,9 @@
+ 
+     /* Temporal target planning and stable view reservation */
+     for (int _i = 0; _i < MAX_OFF_RTS; _i++) s_d3d.off_rt[_i].used = 0;
+-    if (!temporal_prepare_targets()) {
+-        static int _te = 0;
+-        if (_te++ < 8)
+-            fprintf(stderr, "[TEMPORAL] Target planning failed: op=%u unit=%d error='%s'\n",
+-                    s_temporal_error_op, s_temporal_error_unit, s_temporal_error ? s_temporal_error : "desconhecido");
+-    }
++    if (!temporal_prepare_targets())
++        temporal_abort(s_temporal_error_op, s_temporal_error_unit, s_temporal_error);
++
+ 
+     /* Per-frame VP textures + guest-FP pipelines: for each VP draw, upload the
+      * texture it had bound at submit time into a slot (SRV heap 1+slot; plasma
+@@ -4152,29 +4275,28 @@
+         /* Fill this draw's t0-t15 SRV window: each unit
+          * resolves to an offscreen RT (sampled directly), an uploaded guest
+          * texture, or a null SRV. */
+-        /* Resolve the draw PSO and sampler mask before populating SRVs */
++        /* Pin the actual pipeline selected for this operation. Cache eviction
++         * during later preparation cannot destroy a recorded pipeline. */
+         double _ps0 = perf_on() ? perf_now() : 0.0;
+-        ID3D12PipelineState* _pre_pso = NULL;
+-        u32 draw_tex_mask = 0x0001u;
+-        if (dr->fp_addr) {
+-            _pre_pso = vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+-                                     dr_num_rts(dr),
+-                                     dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+-                                                : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                     dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr), dr->depth_key);
+-            for (u32 _k = 0; _k < s_d3d.vp_fp_n; _k++) {
+-                if (s_d3d.vp_fp[_k].pso == _pre_pso) {
+-                    draw_tex_mask = s_d3d.vp_fp[_k].texture_mask;
+-                    break;
+-                }
+-            }
+-        }
++        u32 draw_tex_mask;
++        ID3D12PipelineState* _pre_pso = temporal_select_pipeline(_d, dr, &draw_tex_mask);
++        if (!_pre_pso) temporal_abort(_d, -1, "no effective vertex-program pipeline");
++        _pre_pso->lpVtbl->AddRef(_pre_pso);
++        s_temporal_pso[_d] = _pre_pso;
++        s_temporal_guest_fp[_d] = _pre_pso != s_d3d.pipeline_state_vp &&
++                                  _pre_pso != s_d3d.pipeline_state_vp_color;
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+-        temporal_prepare_textures(_d, draw_tex_mask);
++        if (!temporal_prepare_textures(_d, draw_tex_mask))
++            temporal_abort(s_temporal_error_op, s_temporal_error_unit, s_temporal_error);
+ 
+         double _sv0 = perf_on() ? perf_now() : 0.0;
+         for (int _u = 0; _u < RSX_MAX_TEXTURES; _u++) {
+             u32 wslot = rsx_d3d12_guest_draw_srv_index(_d, (u32)_u);
++            if (!(draw_tex_mask & (1u << _u))) {
++                srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
++                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                continue;
++            }
+             /* SCREEN_AS_TEX=1 is a diagnostic substitution. Matching dimensions
+              * alone do not identify the producer of a guest texture (a Bink
+              * luma plane can have the same dimensions as the display). */
+@@ -4267,6 +4389,10 @@
+         if (perf_on()) s_perf_srv += perf_now() - _sv0;
+     }
+ 
++    memcpy(s_pending_rt_views, s_off_rt_views, sizeof(s_off_rt_views));
++    s_pending_rt_epoch = s_off_rt_epoch;
++    s_temporal_pending = 1;
++
+     /* Transition render target to RENDER_TARGET state */
+     D3D12_RESOURCE_BARRIER barrier = {0};
+     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -4463,6 +4589,8 @@
+             for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+                 const D3D12DrawRecord* dr = &s_d3d.draws[d];
+                 if (!dr->is_vp) continue;
++                if (dr->is_clear && !(dr->surface_meta.clear_flags & 0xF0u)) continue;
++                temporal_before_op(d);
+                 if (!dr->is_clear && dr->rt_off == 0) s_had_direct_backbuffer = 1;
+                 /* The reduced-viewport passes (this title's reflection, drawn
+                  * into a region of the same target) finish here -- snapshot
+@@ -4484,12 +4612,12 @@
+                 /* Render-to-texture: retarget when this op's surfaces differ.
+                  * Depth is a single shared buffer, so clear it per switch. */
+                 int want = s_rt_plan[d].target[0];
+-                if (want < 0 && dr->rt_off) want = off_rt_find(dr->rt_off);
++                if (want < 0 && dr->rt_off) temporal_abort(d, -1, "missing destination plan");
+                 if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off; }
+                 int wantm[3];
+                 for (int _m = 0; _m < 3; _m++) {
+                     wantm[_m] = s_rt_plan[d].target[_m + 1];
+-                    if (wantm[_m] < 0 && dr->rt_mrt[_m]) wantm[_m] = off_rt_find(dr->rt_mrt[_m]);
++                    if (wantm[_m] < 0 && dr->rt_mrt[_m]) temporal_abort(d, -1, "missing MRT plan");
+                 }
+                 if (want != cur_rt || wantm[0] != cur_m[0] ||
+                     wantm[1] != cur_m[1] || wantm[2] != cur_m[2]) {
+@@ -4560,48 +4688,31 @@
+                     for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
+                 }
+                 if (dr->is_clear) {
+-                    /* CLEAR_SURFACE bits 0/1 select depth/stencil only.
+-                     * They must not erase any color attachment. Per-channel
+-                     * color masks and guest depth/stencil remain separate work. */
+                     if (!(dr->surface_meta.clear_flags & 0xF0u)) continue;
+-                    D3D12_CPU_DESCRIPTOR_HANDLE rh =
+-                        (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
+-                    /* RT_CLEARDBG=1: clear offscreen targets to magenta rather
+-                     * than the guest colour. "0.000% nonzero" cannot tell an
+-                     * untouched surface from one written black, and that
+-                     * ambiguity invalidates every read of an offscreen target.
+-                     * If the surface comes back magenta the clears land and the
+-                     * draws are writing black; if it stays black, nothing
+-                     * reaches it at all. */
+-                    { static int cd = -1;
+-                      if (cd < 0) { const char* e = getenv("RT_CLEARDBG"); cd = e ? atoi(e) : 0; }
+-                      if (cd && cur_rt >= 0) {
+-                          const float mag[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+-                          s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list, rh, mag, 0, NULL);
+-                      } else
+-                          s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list, rh, dr->cc, 0, NULL); }
+-                    for (int _m = 0; _m < 3; _m++)
+-                        if (cur_m[_m] >= 0) {
+-                            D3D12_CPU_DESCRIPTOR_HANDLE rhm = off_rt_rtv(cur_m[_m]);
+-                            s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list, rhm, dr->cc, 0, NULL);
+-                        }
+-                    s_off_rt_epoch++;
+-                    if (cur_rt >= 0) s_off_rt_views[cur_rt].complete_at = s_off_rt_epoch;
+-                    for (int _m = 0; _m < 3; _m++)
+-                        if (cur_m[_m] >= 0) s_off_rt_views[cur_m[_m]].complete_at = s_off_rt_epoch;
++                    /* RT_CLEARDBG=1: clear offscreen targets to magenta only
++                     * within the same captured clip/scissor as the guest. */
++                    static int cd = -1;
++                    if (cd < 0) { const char* e = getenv("RT_CLEARDBG"); cd = e ? atoi(e) : 0; }
++                    const float mag[4] = {1.0f, 0.0f, 1.0f, 1.0f};
++                    for (int member = 0; member < 4; ++member) {
++                        int slot = member ? cur_m[member - 1] : cur_rt;
++                        if (member && slot < 0) continue;
++                        u32 width = slot >= 0 ? s_d3d.off_rt[slot].w : s_d3d.width;
++                        u32 height = slot >= 0 ? s_d3d.off_rt[slot].h : s_d3d.height;
++                        D3D12_RECT rect = temporal_clear_rect(dr, width, height);
++                        if (rect.left == rect.right || rect.top == rect.bottom) continue;
++                        D3D12_CPU_DESCRIPTOR_HANDLE rh = slot >= 0 ? off_rt_rtv(slot) : rtv_handle;
++                        s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list,
++                            rh, (cd && slot >= 0) ? mag : dr->cc, 1, &rect);
++                    }
++                    temporal_after_op(d);
+                     continue;
+                 }
+                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
+                  * back to the hardcoded atlas/colour PS pair. */
+-                ID3D12PipelineState* dpso =
+-                    dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+-                                                dr_num_rts(dr),
+-                                                dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
+-                                                           : DXGI_FORMAT_R8G8B8A8_UNORM,
+-                                                dr->fp_exp32, dr->cmask, dr->cull,
+-                                                dr_cube_mask(dr), dr->depth_key) : NULL;
+-                s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
+-                                                         dpso ? dpso : vpso);
++                ID3D12PipelineState* dpso = s_temporal_pso[d];
++                if (!dpso) temporal_abort(d, -1, "recorded pipeline was not retained");
++                s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, dpso);
+                 /* Per-draw viewport: the guest rect when sane, else the
+                  * full target. Scissor tracks the same rect. */
+                 {
+@@ -4616,9 +4727,7 @@
+                         dvp.Width    = (float)dr->vp_w;
+                         dvp.Height   = (float)dr->vp_h;
+                     }
+-                    D3D12_RECT dsc = {(LONG)dvp.TopLeftX, (LONG)dvp.TopLeftY,
+-                                      (LONG)(dvp.TopLeftX + dvp.Width),
+-                                      (LONG)(dvp.TopLeftY + dvp.Height)};
++                    D3D12_RECT dsc = temporal_clear_rect(dr, (u32)tw, (u32)th);
+                     dvp_x = dvp.TopLeftX; dvp_y = dvp.TopLeftY;
+                     dvp_w = dvp.Width;    dvp_h = dvp.Height;
+                     s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
+@@ -4681,10 +4790,7 @@
+                   } }
+                 s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                     dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
+-                s_off_rt_epoch++;
+-                if (cur_rt >= 0) s_off_rt_views[cur_rt].complete_at = s_off_rt_epoch;
+-                for (int _m = 0; _m < 3; _m++)
+-                    if (cur_m[_m] >= 0) s_off_rt_views[cur_m[_m]].complete_at = s_off_rt_epoch;
++                temporal_after_op(d);
+                 /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
+                  * "records exist" and "draws were submitted" are different
+                  * claims, and every blank-output investigation conflates them. */
+@@ -4692,7 +4798,7 @@
+                   if (cap < 0) { const char* e = getenv("VP_SUBMIT"); cap = e ? atoi(e) : 0; }
+                   if (cap && n < cap) { n++;
+                     fprintf(stderr, "[VPSUBMIT] draw[%u] verts=%u pso=%s vp=%ux%u tex0=0x%X(set=%d) tex1=0x%X slot=%d fp=0x%X%c",
+-                            d, dr->vertex_count, dpso ? "guest-fp" : "fallback",
++                            d, dr->vertex_count, s_temporal_guest_fp[d] ? "guest-fp" : "fallback",
+                             dr->vp_w, dr->vp_h, dr->tex[0].raw, dr->tex[0].set,
+                             dr->tex[1].raw, dr->tex_slot, dr->fp_addr, 10);
+                     fprintf(stderr, "            vs_idx=%d cb_slot=%u vbofs=%u cull=%u blend=%d%c",
+@@ -4953,10 +5059,18 @@
+         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &barrier);
+     }
+ 
+-    /* Close and execute */
+-    s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
++    /* Publish temporal watermarks only after this complete batch executed. */
++    if (FAILED(s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list)))
++        temporal_abort(UINT32_MAX, -1, "command-list Close failed");
+     ID3D12CommandList* cmd_lists[] = {(ID3D12CommandList*)s_d3d.cmd_list};
+     s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cmd_lists);
++    wait_for_gpu();
++    if (s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device) != S_OK ||
++            s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) == UINT64_MAX ||
++            s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[fi])
++        temporal_abort(UINT32_MAX, -1, "temporal GPU batch did not complete");
++    temporal_commit();
++    temporal_release_completed_resources();
+ 
+     /* D3D12_IQ=1: drain the debug layer's message queue after submitting the
+      * frame. The legacy (is_vp=0) DrawInstanced path silently produced ZERO
+@@ -5273,6 +5387,26 @@
+         }
+         return;
+     }
++
++    /* Display color clears use the legacy full-frame boundary below.
++     * Depth/stencil-only requests must not replace its color or trigger it.
++     * Partial display color clears cannot use that path without losing
++     * channels or pixels, so reject them before any pending frame submits. */
++    if (!(flags & 0xF0u)) return;
++    if ((flags & 0xF0u) != 0xF0u)
++        temporal_abort(UINT32_MAX, -1, "unsupported display clear color mask");
++    if (mrt[0] || mrt[1] || mrt[2])
++        temporal_abort(UINT32_MAX, -1, "unsupported display clear multiple color targets");
++    D3D12DrawRecord display_clear = {0};
++    record_surface_metadata(&display_clear, flags, depth, stencil);
++    if (!display_clear.surface_meta.valid ||
++            (display_clear.surface_meta.color_target != CELL_GCM_SURFACE_TARGET_0 &&
++             display_clear.surface_meta.color_target != CELL_GCM_SURFACE_TARGET_1))
++        temporal_abort(UINT32_MAX, -1, "unsupported display clear color target selection");
++    D3D12_RECT display_rect = temporal_clear_rect(&display_clear, s_d3d.width, s_d3d.height);
++    if (!display_clear.surface_meta.valid || display_rect.left || display_rect.top ||
++            display_rect.right != (LONG)s_d3d.width || display_rect.bottom != (LONG)s_d3d.height)
++        temporal_abort(UINT32_MAX, -1, "unsupported display clear region");
+ 
+     memcpy(s_d3d.clear_color, cc, sizeof(cc));
+ 
+@@ -6762,6 +6896,7 @@
+     if (!s_d3d.initialized) return;
+ 
+     wait_for_gpu();
++    temporal_release_completed_resources();
+     flush_deferred_releases();
+     vp_vs_cache_clear();
+ 
+@@ -6769,6 +6904,8 @@
+         if (s_d3d.off_rt[i].res) { s_d3d.off_rt[i].res->lpVtbl->Release(s_d3d.off_rt[i].res); s_d3d.off_rt[i].res = NULL; }
+         if (s_d3d.off_rt[i].up)  { s_d3d.off_rt[i].up->lpVtbl->Release(s_d3d.off_rt[i].up);   s_d3d.off_rt[i].up = NULL; }
+     }
++    s_off_rt_count = 0; s_off_rt_epoch = s_pending_rt_epoch = 0; s_temporal_pending = 0;
++    memset(s_off_rt_views, 0, sizeof(s_off_rt_views));
+     for (int i = 0; i < VP_TEX_SLOTS; i++) {
+         if (s_d3d.vp_tex[i].res) { s_d3d.vp_tex[i].res->lpVtbl->Release(s_d3d.vp_tex[i].res); s_d3d.vp_tex[i].res = NULL; }
+         if (s_d3d.vp_tex[i].up)  { s_d3d.vp_tex[i].up->lpVtbl->Release(s_d3d.vp_tex[i].up);   s_d3d.vp_tex[i].up = NULL; }
+--- a/libs/video/rsx_d3d12_linear_copy.h
++++ b/libs/video/rsx_d3d12_linear_copy.h
+@@ -27,7 +27,7 @@
+  * not manufacture a feedback snapshot or perform format reinterpretation.
+  * Validate the complete plan before emission. On a later failure discard the
+  * whole pending command list: resetting state pointers cannot undo commands. */
+-static inline int rsx_d3d12_linear_copy_emit(void* user, uint32_t src,
++static inline int rsx_d3d12_linear_copy_valid(void* user, uint32_t src,
+         uint32_t dst, const rsx_linear_copy_span* span)
+ {
+     rsx_d3d12_linear_copy_context* context = (rsx_d3d12_linear_copy_context*)user;
+@@ -48,6 +48,17 @@
+     uint64_t sa = s->view.offset + (uint64_t)span->src_y * s->view.pitch + (uint64_t)span->src_x * 4;
+     uint64_t da = d->view.offset + (uint64_t)span->dst_y * d->view.pitch + (uint64_t)span->dst_x * 4;
+     if (sa != da) return 0;
++
++    return 1;
++}
++
++static inline int rsx_d3d12_linear_copy_emit(void* user, uint32_t src,
++        uint32_t dst, const rsx_linear_copy_span* span)
++{
++    if (!rsx_d3d12_linear_copy_valid(user, src, dst, span)) return 0;
++    rsx_d3d12_linear_copy_context* context = (rsx_d3d12_linear_copy_context*)user;
++    rsx_d3d12_linear_resource* s = &context->resources[src];
++    rsx_d3d12_linear_resource* d = &context->resources[dst];
+ 
+     D3D12_RESOURCE_BARRIER barriers[2];
+     UINT count = 0;
+--- /dev/null
++++ b/libs/video/rsx_d3d12_temporal_replay.h
+@@ -0,0 +1,120 @@
++#ifndef RSX_D3D12_TEMPORAL_REPLAY_H
++#define RSX_D3D12_TEMPORAL_REPLAY_H
++
++#include "rsx_linear_coherence.h"
++#include "rsx_d3d12_linear_copy.h"
++
++/* Lexical backend adapter, after the stable record planner and transition
++ * helper. Only pending watermarks change while recording. The caller must
++ * discard the whole command list on failure and call commit only after its
++ * fence completed successfully. Resources and seeds outlive that fence. */
++static void temporal_validate_record(u32 draw)
++{
++    if (!s_temporal_pending || draw >= s_d3d.draw_count || draw >= MAX_DRAWS ||
++            s_off_rt_count > MAX_OFF_RTS || s_pending_rt_epoch == UINT64_MAX)
++        temporal_abort(draw, -1, "invalid pending temporal record");
++    if (s_rt_plan[draw].texture_mask & ~0xFFFFu)
++        temporal_abort(draw, -1, "unknown temporal shader mask");
++    for (u32 i = 0; i < s_off_rt_count; ++i) {
++        if (!rsx_linear_view_valid(&s_pending_rt_views[i].view) ||
++                s_pending_rt_views[i].complete_at > s_pending_rt_epoch ||
++                !s_d3d.off_rt[i].res ||
++                s_d3d.off_rt[i].dxgi != DXGI_FORMAT_R8G8B8A8_UNORM)
++            temporal_abort(draw, -1, "invalid temporal resource catalog");
++    }
++    for (int i = 0; i < 4; ++i) {
++        int slot = s_rt_plan[draw].target[i];
++        if (slot < -1 || (slot >= 0 && (u32)slot >= s_off_rt_count))
++            temporal_abort(draw, -1, "invalid temporal destination identity");
++    }
++    for (int unit = 0; unit < 16; ++unit) {
++        if (!(s_rt_plan[draw].texture_mask & (1u << unit))) continue;
++        int slot = s_d3d.draws[draw].tex_rt[unit];
++        if (slot < -1 || (slot >= 0 && (u32)slot >= s_off_rt_count))
++            temporal_abort(draw, unit, "invalid temporal source identity");
++    }
++}
++
++static int temporal_validate_span(void* user, u32 src, u32 dst,
++        const rsx_linear_copy_span* span)
++{
++    return rsx_d3d12_linear_copy_valid(user, src, dst, span);
++}
++
++static int temporal_emit_span(void* user, u32 src, u32 dst,
++        const rsx_linear_copy_span* span)
++{
++    if (!rsx_d3d12_linear_copy_emit(user, src, dst, span)) return 0;
++    s_d3d.off_rt[src].used = s_d3d.off_rt[dst].used = 1;
++    return 1;
++}
++
++static void temporal_materialize(int slot, u32 draw)
++{
++    if (slot < 0) return;
++    if (!s_temporal_pending || (u32)slot >= s_off_rt_count || s_off_rt_count > MAX_OFF_RTS)
++        temporal_abort(draw, -1, "invalid materialization identity");
++    rsx_d3d12_linear_resource resources[MAX_OFF_RTS];
++    for (u32 i = 0; i < s_off_rt_count; ++i) {
++        resources[i].resource = s_d3d.off_rt[i].res;
++        resources[i].state = &s_d3d.off_rt[i].st;
++        resources[i].view = s_pending_rt_views[i].view;
++        resources[i].format = (DXGI_FORMAT)s_d3d.off_rt[i].dxgi;
++    }
++    rsx_d3d12_linear_copy_context context = {s_d3d.cmd_list, resources, s_off_rt_count};
++    /* Validate the complete copy plan before its first barrier or copy. The
++     * catalog is unchanged between this pass and emission. */
++    int result = rsx_linear_plan_materialize(s_pending_rt_views, s_off_rt_count,
++        (u32)slot, s_pending_rt_epoch, temporal_validate_span, &context);
++    if (result != RSX_LINEAR_OK)
++        temporal_abort(draw, -1, "temporal copy plan validation failed");
++    result = rsx_linear_plan_materialize(s_pending_rt_views, s_off_rt_count,
++        (u32)slot, s_pending_rt_epoch, temporal_emit_span, &context);
++    if (result != RSX_LINEAR_OK)
++        temporal_abort(draw, -1, "temporal copy emission failed; discard command list");
++    s_pending_rt_views[slot].complete_at = s_pending_rt_epoch;
++    s_d3d.off_rt[slot].used = 1;
++}
++
++static void temporal_before_op(u32 draw)
++{
++    temporal_validate_record(draw);
++    /* Reconcile every input before restoring states. A later reconciliation
++     * may use a previously reconciled view as COPY_SOURCE. */
++    for (int unit = 0; unit < 16; ++unit)
++        if (s_rt_plan[draw].texture_mask & (1u << unit))
++            temporal_materialize(s_d3d.draws[draw].tex_rt[unit], draw);
++    for (int member = 0; member < 4; ++member)
++        temporal_materialize(s_rt_plan[draw].target[member], draw);
++    for (int unit = 0; unit < 16; ++unit) {
++        if (!(s_rt_plan[draw].texture_mask & (1u << unit))) continue;
++        int slot = s_d3d.draws[draw].tex_rt[unit];
++        if (slot >= 0) off_rt_transition(slot, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++    }
++    for (int member = 0; member < 4; ++member) {
++        int slot = s_rt_plan[draw].target[member];
++        if (slot >= 0) off_rt_transition(slot, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    }
++}
++
++static void temporal_after_op(u32 draw)
++{
++    temporal_validate_record(draw);
++    ++s_pending_rt_epoch;
++    for (int member = 0; member < 4; ++member) {
++        int slot = s_rt_plan[draw].target[member];
++        if (slot >= 0) s_pending_rt_views[slot].complete_at = s_pending_rt_epoch;
++    }
++}
++
++static void temporal_commit(void)
++{
++    if (!s_temporal_pending || s_off_rt_count > MAX_OFF_RTS)
++        temporal_abort(UINT32_MAX, -1, "invalid temporal commit");
++    memcpy(s_off_rt_views, s_pending_rt_views,
++        (size_t)s_off_rt_count * sizeof(s_off_rt_views[0]));
++    s_off_rt_epoch = s_pending_rt_epoch;
++    s_temporal_pending = 0;
++}
++
++#endif

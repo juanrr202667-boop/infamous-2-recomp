@@ -1,0 +1,97 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "displayName": "Windows x64 (clang-cl, Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-windows-clang-cl.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "windows-tests",
+      "inherits": "windows-base",
+      "displayName": "Synthetic tests only (no game files)",
+      "description": "Builds the SDK runtime and the native fixtures against tests/native/synthetic_recomp. No EBOOT, ELF, PPU lift, or GPU is required.",
+      "cacheVariables": {
+        "PORT_BUILD_TESTS_ONLY": "ON"
+      }
+    },
+    {
+      "name": "windows-port",
+      "inherits": "windows-base",
+      "displayName": "Full port (requires local game inputs)",
+      "description": "Full native executable. RECOMP_DIR must contain the locally generated ppu_recomp.h and lifted sources.",
+      "cacheVariables": {
+        "PS3RECOMP_DIR": "${sourceDir}/tools/ps3recomp",
+        "RECOMP_DIR": "${sourceDir}/build/game/recomp",
+        "PORT_RUNNER_TESTS": "ON",
+        "PORT_STRICT_SDK_REVISION": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-tests",
+      "configurePreset": "windows-tests",
+      "jobs": 4
+    },
+    {
+      "name": "windows-port",
+      "configurePreset": "windows-port",
+      "jobs": 4
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-tests",
+      "configurePreset": "windows-tests",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false,
+        "timeout": 120
+      }
+    },
+    {
+      "name": "windows-tests-cpu",
+      "inherits": "windows-tests",
+      "filter": {
+        "exclude": {
+          "label": "gpu-optional|game-local"
+        }
+      }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "windows-tests",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "windows-tests"
+        },
+        {
+          "type": "build",
+          "name": "windows-tests"
+        },
+        {
+          "type": "test",
+          "name": "windows-tests"
+        }
+      ]
+    }
+  ]
+}

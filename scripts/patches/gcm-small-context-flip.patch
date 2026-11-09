@@ -1,0 +1,30 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2406,9 +2406,14 @@
+     if (!ctx || bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM ||
+         !s_display_buffer_set[bufferId]) return 0;
+     const u32 end = vm_read32(ctx + 4), cur = vm_read32(ctx + 8);
+-    /* Never near the end: those bytes are the title's reserve before its
+-     * ring wraps, and the recycle above keys on them. */
+-    if (cur + 8 + GCM_RECYCLE_SLACK > end || gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
++    /* A title may submit a small slice with its own rollover bookkeeping.
++     * Its flip needs one word; the runtime's own ring retains its recycle
++     * reserve. Check in 64 bits so a wrapped addition cannot admit a write. */
++    if ((u64)cur + 4 > end || gcm_ea2io(cur) == 0xFFFFFFFFu) return 0;
++    const u32 callback = vm_read32(ctx + 0xC);
++    const int runtime_ring = callback &&
++        vm_read32(callback) == GCM_FIFO_CALLBACK_SENTINEL_EA;
++    if (runtime_ring && (u64)cur + 8 + GCM_RECYCLE_SLACK > end) return 0;
+     vm_write32(cur, GCM_FLIP_MARKER | bufferId);
+     /* Wrap here, on the guest thread, once the ring is nearly used -- what the
+      * SDK's buffer-full callback does. Otherwise the drain thread recycles it
+@@ -2423,8 +2428,7 @@
+         /* The runtime's callback owns its ring. A title callback owns its
+          * context and may place a fence after the flip; rewinding here would
+          * overwrite that tail before the title can publish it. */
+-        const u32 callback = vm_read32(ctx + 0xC);
+-        if (callback && vm_read32(callback) == GCM_FIFO_CALLBACK_SENTINEL_EA) {
++        if (runtime_ring) {
+             vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
+             vm_write32(ctx + 8, begin);
+             return 1;

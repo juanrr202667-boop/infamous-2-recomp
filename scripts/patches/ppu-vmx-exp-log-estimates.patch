@@ -1,0 +1,60 @@
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -169,6 +169,29 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <math.h>
++#include <fenv.h>
++
++/* AltiVec estimates use guest VSCR.NJ, independently of a foreign caller's
++ * FTZ/DAZ or rounding mode. Restore host status/control after each vector. */
++#if defined(_M_X64) || defined(__x86_64__)
++#include <xmmintrin.h>
++typedef unsigned ppu_vmx_fp_env;
++static inline ppu_vmx_fp_env ppu_vmx_fp_begin(void) {
++    unsigned saved = _mm_getcsr();
++    _mm_setcsr(0x1F80u); /* nearest, gradual underflow, masked exceptions */
++    return saved;
++}
++static inline void ppu_vmx_fp_end(ppu_vmx_fp_env saved) { _mm_setcsr(saved); }
++#else
++typedef fenv_t ppu_vmx_fp_env;
++static inline ppu_vmx_fp_env ppu_vmx_fp_begin(void) {
++    fenv_t saved;
++    fegetenv(&saved);
++    fesetenv(FE_DFL_ENV);
++    return saved;
++}
++static inline void ppu_vmx_fp_end(ppu_vmx_fp_env saved) { fesetenv(&saved); }
++#endif
+ 
+ /* Float->int conversion per Book I 4.6.7: SATURATE out-of-range (positive
+  * overflow => max, negative => min, NaN => min) and honor the rounding mode
+@@ -2680,6 +2703,27 @@
+             return (f"{{ {ty} tmp[{cnt}]; {ty}* a=({ty}*)&ctx->vr[{va}]; {ty}* b=({ty}*)&ctx->vr[{vb}]; "
+                     f"for(int i=0;i<{half};i++) {{ tmp[i*2]=a[{off}+i]; tmp[i*2+1]=b[{off}+i]; }} "
+                     f"memcpy(&ctx->vr[{vd}], tmp, 16); }}")
++
++        # AltiVec 2^x / log2 estimates (NXP PEM 6-97, 6-99). Ordinary
++        # libm values meet the ISA estimate bounds; they are not a bit-exact
++        # reproduction of one Cell implementation's approximation table.
++        if mn in ("vexptefp", "vlogefp"):
++            vd, vb = int(ops[0][1:]), int(ops[-1][1:])
++            operation = "exp2f" if mn == "vexptefp" else "log2f"
++            log_special = ("else if((x&0x7FFFFFFFu)==0) d[i]=0xFF800000u; "
++                           "else if(x&0x80000000u) d[i]=0x7FC00000u; "
++                           if mn == "vlogefp" else "")
++            return (f"{{ uint32_t b[4],d[4]; ppu_vldu4(&ctx->vr[{vb}],b); "
++                    "ppu_vmx_fp_env env=ppu_vmx_fp_begin(); "
++                    "int nj=(ctx->vscr&0x10000u)!=0; "
++                    "for(int i=0;i<4;i++){ uint32_t x=b[i]; "
++                    "if(nj && (x&0x7F800000u)==0) x&=0x80000000u; "
++                    "if((x&0x7FFFFFFFu)>0x7F800000u) d[i]=x|0x00400000u; "
++                    + log_special +
++                    f"else {{ float a,y; memcpy(&a,&x,4); y={operation}(a); "
++                    "memcpy(&d[i],&y,4); } "
++                    "if(nj && (d[i]&0x7F800000u)==0) d[i]&=0x80000000u; } "
++                    f"ppu_vmx_fp_end(env); ppu_vstu4(&ctx->vr[{vd}],d); }}")
+ 
+         # Float reciprocal estimate / reciprocal sqrt estimate
+         if mn == "vrefp":

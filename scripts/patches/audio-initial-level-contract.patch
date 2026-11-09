@@ -1,0 +1,21 @@
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -650,13 +650,15 @@
+ 
+         u32 nch    = (u32)port->param.nChannel;
+         u32 nblock = (u32)port->param.nBlock;
+-        float level = port->param.level;
+-        if (level <= 0.0f) level = 1.0f;
++        /* Initial level is meaningful only with AUDIO_PORT_INITLEVEL (0x1000).
++         * Preserve the existing invalid-value fallback; zero is a valid mute. */
++        float level = (port->param.attr & 0x1000ULL) ? port->param.level : 1.0f;
++        if (level < 0.0f) level = 1.0f;
+         if (level > 1.0f) level = 1.0f;
+         if (observe_amplitude && port->read_index == 0) {
+             u32 level_bits; memcpy(&level_bits, &port->param.level, sizeof(level_bits));
+             fprintf(stderr, "[audio-gain] port=%d channels=%u attr=%016llX level_bits=%08X "
+-                    "level=%.9g applied=%.9g (observed-existing-policy)\n", p, nch,
++                    "level=%.9g applied=%.9g (level applied according to attr bit 0x1000)\n", p, nch,
+                     (unsigned long long)port->param.attr, level_bits,
+                     (double)port->param.level, (double)level);
+         }

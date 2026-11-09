@@ -1,0 +1,85 @@
+diff --git "a/runtime/ppu/ppu_loader.cpp" "b/runtime/ppu/ppu_loader.cpp"
+index fce01fb..adc13c4 100644
+--- "a/runtime/ppu/ppu_loader.cpp"
++++ "b/runtime/ppu/ppu_loader.cpp"
+@@ -619,6 +619,36 @@ static void samp_report(void)
+ static DWORD s_samp_boot_tid;
+ static int   s_samp_main = -1;
+ static int   s_samp_direct_only = 0;
++/* Optional bounded RIP histogram for one suspect guest function. Only the
++ * sampler thread touches these fields; no guest memory or context is read. */
++static unsigned s_rip_after = 0, s_rip_window_ms = 1000, s_rip_max = 10;
++static unsigned s_rip_windows = 0, s_rip_used = 0, s_rip_overflow = 0;
++static uint32_t s_rip_bucket[128], s_rip_count[128];
++static uint64_t s_rip_next = 0;
++static uintptr_t s_rip_target = 0;
++
++static void samp_rip_sample(uintptr_t rip, uint64_t now, uint64_t t0) {
++    if (!s_rip_after || s_rip_windows >= s_rip_max || now - t0 < s_rip_after || !s_rip_target) return;
++    DWORD64 image = 0;
++    RUNTIME_FUNCTION* rf = RtlLookupFunctionEntry((DWORD64)rip, &image, nullptr);
++    if (!rf || image + rf->BeginAddress != s_rip_target || rip >= image + rf->EndAddress) return;
++    const uint32_t bucket = (uint32_t)((rip - s_rip_target) & ~(uintptr_t)15);
++    unsigned i = 0; while (i < s_rip_used && s_rip_bucket[i] != bucket) ++i;
++    if (i == 128) { ++s_rip_overflow; return; }
++    if (i == s_rip_used) { s_rip_bucket[i] = bucket; ++s_rip_used; }
++    ++s_rip_count[i];
++}
++static void samp_rip_report(uint64_t now, uint64_t t0) {
++    if (!s_rip_after || s_rip_windows >= s_rip_max || now - t0 < s_rip_after) return;
++    if (!s_rip_next) s_rip_next = t0 + s_rip_after + s_rip_window_ms;
++    if (now < s_rip_next) return;
++    fprintf(stderr, "[samp-rip] window=%u elapsed_ms=%llu overflow=%u\n",
++            ++s_rip_windows, (unsigned long long)(now - t0), s_rip_overflow);
++    for (unsigned i = 0; i < s_rip_used; ++i)
++        fprintf(stderr, "[samp-rip] bucket=%08X count=%u\n", s_rip_bucket[i], s_rip_count[i]);
++    fflush(stderr); s_rip_used = s_rip_overflow = 0;
++    memset(s_rip_count, 0, sizeof s_rip_count); s_rip_next = now + s_rip_window_ms;
++}
+ 
+ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+ {
+@@ -646,6 +676,14 @@ static DWORD WINAPI samp_thread(LPVOID p)
+     unsigned ei = 0;
+     unsigned long long next_report = t0 + early[0];
+     samp_build_map();
++    if (s_rip_after) {
++        for (uint64_t k = 0; k < s_samp_n; ++k)
++            if (!s_samp_map[k].spu && s_samp_map[k].g == 0x00314BC8) s_rip_target = s_samp_map[k].h;
++        /* A shared host address is ambiguous even when unwind bounds match. */
++        for (uint64_t k = 0; k < s_samp_n && s_rip_target; ++k)
++            if (s_samp_map[k].h == s_rip_target && (s_samp_map[k].spu || s_samp_map[k].g != 0x00314BC8)) s_rip_target = 0;
++        fprintf(stderr, "[samp-rip] target=%s\n", s_rip_target ? "unique" : "missing-or-ambiguous");
++    }
+     for (;;) {
+         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+         if (snap != INVALID_HANDLE_VALUE) {
+@@ -660,6 +698,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
+                     CONTEXT c; c.ContextFlags = CONTEXT_CONTROL;
+                     if (GetThreadContext(h, &c)) {
+                         s_samp_total++;
++                        if (s_rip_after) samp_rip_sample((uintptr_t)c.Rip, GetTickCount64(), t0);
+                         uint32_t g = samp_lookup((uintptr_t)c.Rip);
+                         if (!g && s_samp_main > 0 && !s_samp_direct_only) g = samp_stack_guest(h, &c);
+                         if (g) { s_samp_guest++; samp_hit(g); samp_tid_hit(te.th32ThreadID);
+@@ -675,6 +714,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
+             CloseHandle(snap);
+         }
+         Sleep(period);
++        if (s_rip_after) samp_rip_report(GetTickCount64(), t0);
+         if (GetTickCount64() >= next_report) {
+             fprintf(stderr, "[samp] --- report at t=%llums ---\n",
+                     (unsigned long long)(GetTickCount64() - t0));
+@@ -738,6 +778,12 @@ void ps3_sampler_start(void)
+     s_samp_main = getenv("PS3_SAMPLE_MAIN") ? 1 : 0;
+     { const char* direct = getenv("PS3_SAMPLE_DIRECT_ONLY");
+       s_samp_direct_only = direct && strcmp(direct, "1") == 0; }
++    { const char* v = getenv("PS3_SAMPLE_RIP_AFTER_MS"); char* end = nullptr;
++      if (v && *v) { unsigned long n = strtoul(v, &end, 10); if (!*end && n && n <= 3600000) s_rip_after = (unsigned)n; }
++      v = getenv("PS3_SAMPLE_RIP_WINDOW_MS");
++      if (v && *v) { unsigned long n = strtoul(v, &end, 10); if (!*end && n >= 10 && n <= 60000) s_rip_window_ms = (unsigned)n; else s_rip_after = 0; }
++      v = getenv("PS3_SAMPLE_RIP_MAX_WINDOWS");
++      if (v && *v) { unsigned long n = strtoul(v, &end, 10); if (!*end && n && n <= 1000) s_rip_max = (unsigned)n; else s_rip_after = 0; } }
+     /* Self-check: does .pdata actually describe the lifted bodies? If not, the
+      * exact attribution mode misses ALL guest code by construction and its "0
+      * guest samples" means nothing. Print it rather than assume either way. */

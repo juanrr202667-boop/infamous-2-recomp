@@ -1,0 +1,75 @@
+name: Bug report
+description: A reproduced defect with a concrete observation
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach game files, firmware, keys, saves, captures, or personal paths.
+        Reports without a synthetic reproduction may be labeled **proprietary-blocked**.
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Content policy
+      options:
+        - label: I have not included game files, keys, saves, captures, or proprietary assets.
+          required: true
+        - label: I removed personal paths, usernames, and secrets from logs.
+          required: true
+  - type: textarea
+    id: observation
+    attributes:
+      label: Observed behavior
+      description: What happened, in one paragraph, without interpreting the cause yet.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Exact command and the smallest synthetic fixture or step.
+      render: powershell
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision / build identifier
+      placeholder: commit, executable SHA-256, or run identifier
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Windows version, GPU/driver if relevant, CMake, clang-cl, SDK
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: First unexpected log line, test output, or a technical summary. No proprietary attachments.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: What would make this issue closable? Include the test that should fail first.
+    validations:
+      required: true
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: Approximate difficulty
+      options:
+        - low
+        - medium
+        - high
+        - unknown
+    validations:
+      required: true

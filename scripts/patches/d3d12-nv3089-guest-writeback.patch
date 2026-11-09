@@ -1,0 +1,202 @@
+--- a/libs/video/cellGcmSys.h
++++ b/libs/video/cellGcmSys.h
+@@ -53,6 +53,9 @@ typedef int (*cellGcmTransferProbeTargetLookup)(u32 location, u32 offset, u32 pi
+         cellGcmTransferProbeTarget* out);
+ void cellGcmSetTransferProbeTargetLookup(cellGcmTransferProbeTargetLookup lookup);
+ 
++typedef int (*cellGcmWritebackHook)(u32 location, u32 offset, u32 pitch);
++void cellGcmSetWritebackHook(cellGcmWritebackHook hook);
++
+ /* Whether the requested source byte falls inside the surface's FIRST row.
+  *
+  * This mirrors the selection rule the public macOS reference uses before it
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -860,6 +860,12 @@ void cellGcmSetTransferProbeTargetLookup(cellGcmTransferProbeTargetLookup lookup
+     s_transfer_probe_targets = lookup;
+ }
+ 
++static cellGcmWritebackHook s_writeback_hook;
++void cellGcmSetWritebackHook(cellGcmWritebackHook hook)
++{
++    s_writeback_hook = hook;
++}
++
+ typedef struct GcmProbeSample {
+     u32 first, last, hash, valid, nonzero;
+ } GcmProbeSample;
+@@ -1012,6 +1018,9 @@ static void nv3089_blit(void)
+         if (!rok && s_nv3089.in_uv <= 0x00100010u && !s_nv3089.out_pt)
+             rsx_live_draw_note_resolve(sl, s_nv3089.in_off, dl, s_gcm2d.dst_offset);
+     }
++    if (s_writeback_hook) {
++        s_writeback_hook(s_nv3089.src_dma != 0xFEED0001u ? 1u : 2u, s_nv3089.in_off, in_pitch);
++    }
+     /* Only the 32-bit colour formats are handled; anything else would need a
+      * per-format converter and is better skipped loudly than written wrong. */
+     u32 f = s_nv3089.fmt & 0xFF;
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -7118,6 +7118,140 @@ static void d3d12_transfer_probe(const cellGcmTransferProbe* event)
+            (unsigned long long)event->target_epoch, event->target_argb8);
+ }
+ 
++static ID3D12Resource* s_wb_rb = NULL;
++static u64 s_wb_rb_size = 0;
++static u64 s_wb_stamp[MAX_OFF_RTS];
++
++int rsx_d3d12_writeback_surface(u32 location, u32 offset, u32 pitch)
++{
++    (void)pitch;
++    if (!s_d3d.initialized || !s_d3d.device || !s_d3d.cmd_list || !s_d3d.cmd_queue) return 0;
++    extern uint8_t* vm_base;
++    if (!vm_base) return 0;
++
++    int best = -1;
++    u64 newest = 0;
++    for (u32 i = 0; i < s_off_rt_count && i < MAX_OFF_RTS; ++i) {
++        const rsx_linear_version* v = &s_off_rt_views[i];
++        if (!s_d3d.off_rt[i].res || v->view.offset > UINT32_MAX) continue;
++        if (s_d3d.off_rt[i].dxgi != DXGI_FORMAT_R8G8B8A8_UNORM) continue;
++        if (!cellGcmTransferProbeFirstRow(location, offset, v->view.location,
++                (u32)v->view.offset, v->view.pitch, v->view.width)) continue;
++        if (best >= 0 && v->complete_at <= newest) continue;
++        newest = v->complete_at;
++        best = (int)i;
++    }
++    if (best < 0) return 0;
++
++    if (s_d3d.draw_count > 0) {
++        s_present_this_frame = 0;
++        render_frame();
++        s_present_this_frame = 1;
++        wait_for_gpu();
++    }
++
++    const rsx_linear_version* view = &s_off_rt_views[best];
++    if (s_wb_stamp[best] == view->complete_at) return 0;
++
++    u32 w = view->view.width;
++    u32 h = view->view.height;
++    if (!w || !h) return 0;
++
++    extern u32 cellGcmResolveLocated(int local, u32 offset);
++    u32 ea = cellGcmResolveLocated(location == 1 ? 1 : 0, (u32)view->view.offset);
++    u8* dst = vm_base + ea;
++
++    u32 rb_pitch = (w * 4u + 255u) & ~255u;
++    u64 need_size = (u64)rb_pitch * h;
++    if (!s_wb_rb || s_wb_rb_size < need_size) {
++        if (s_wb_rb) {
++            s_wb_rb->lpVtbl->Release(s_wb_rb);
++            s_wb_rb = NULL;
++            s_wb_rb_size = 0;
++        }
++        D3D12_HEAP_PROPERTIES hp = {0};
++        hp.Type = D3D12_HEAP_TYPE_READBACK;
++        D3D12_RESOURCE_DESC rd = {0};
++        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        rd.Width = need_size;
++        rd.Height = 1;
++        rd.DepthOrArraySize = 1;
++        rd.MipLevels = 1;
++        rd.SampleDesc.Count = 1;
++        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
++                s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
++                D3D12_RESOURCE_STATE_COPY_DEST, NULL,
++                &IID_ID3D12Resource, (void**)&s_wb_rb)) || !s_wb_rb) {
++            return 0;
++        }
++        s_wb_rb_size = need_size;
++    }
++
++    u32 fi = s_d3d.frame_index;
++    ID3D12Resource* src_res = s_d3d.off_rt[best].res;
++    D3D12_RESOURCE_STATES prior = s_d3d.off_rt[best].st;
++
++    s_d3d.cmd_allocators[fi]->lpVtbl->Reset(s_d3d.cmd_allocators[fi]);
++    s_d3d.cmd_list->lpVtbl->Reset(s_d3d.cmd_list, s_d3d.cmd_allocators[fi], NULL);
++
++    D3D12_RESOURCE_BARRIER b = {0};
++    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = src_res;
++    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    if (prior != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++        b.Transition.StateBefore = prior;
++        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++    }
++
++    D3D12_TEXTURE_COPY_LOCATION dst_loc = {0}, src_loc = {0};
++    dst_loc.pResource = s_wb_rb;
++    dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    dst_loc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    dst_loc.PlacedFootprint.Footprint.Width = w;
++    dst_loc.PlacedFootprint.Footprint.Height = h;
++    dst_loc.PlacedFootprint.Footprint.Depth = 1;
++    dst_loc.PlacedFootprint.Footprint.RowPitch = rb_pitch;
++    src_loc.pResource = src_res;
++    src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++    src_loc.SubresourceIndex = 0;
++    s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst_loc, 0, 0, 0, &src_loc, NULL);
++
++    if (prior != D3D12_RESOURCE_STATE_COPY_SOURCE) {
++        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
++        b.Transition.StateAfter  = prior;
++        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
++    }
++
++    s_d3d.cmd_list->lpVtbl->Close(s_d3d.cmd_list);
++    ID3D12CommandList* cl[] = { (ID3D12CommandList*)s_d3d.cmd_list };
++    s_d3d.cmd_queue->lpVtbl->ExecuteCommandLists(s_d3d.cmd_queue, 1, cl);
++    wait_for_gpu();
++
++    void* mapped = NULL;
++    D3D12_RANGE rr = {0, (SIZE_T)need_size};
++    if (SUCCEEDED(s_wb_rb->lpVtbl->Map(s_wb_rb, 0, &rr, &mapped)) && mapped) {
++        for (u32 y = 0; y < h; ++y) {
++            const u8* sp = (const u8*)mapped + (size_t)y * rb_pitch;
++            u8* dp = dst + (size_t)y * view->view.pitch;
++            for (u32 x = 0; x < w; ++x) {
++                dp[0] = sp[3];
++                dp[1] = sp[0];
++                dp[2] = sp[1];
++                dp[3] = sp[2];
++                sp += 4;
++                dp += 4;
++            }
++        }
++        D3D12_RANGE wr = {0, 0};
++        s_wb_rb->lpVtbl->Unmap(s_wb_rb, 0, &wr);
++    }
++
++    s_wb_stamp[best] = view->complete_at;
++    return 1;
++}
++
+ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+ {
+     memset(&s_d3d, 0, sizeof(s_d3d));
+@@ -7180,6 +7314,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
+     rsx_set_backend(&s_d3d12_backend);
+     cellGcmSetTransferProbeObserver(d3d12_transfer_probe);
+     cellGcmSetTransferProbeTargetLookup(d3d12_transfer_probe_target);
++    cellGcmSetWritebackHook(rsx_d3d12_writeback_surface);
+ 
+     s_d3d.initialized = 1;
+     s_d3d.last_fps_time = GetTickCount64();
+@@ -7193,6 +7328,13 @@ void rsx_d3d12_backend_shutdown(void)
+     if (!s_d3d.initialized) return;
+     cellGcmSetTransferProbeObserver(NULL);
+     cellGcmSetTransferProbeTargetLookup(NULL);
++    cellGcmSetWritebackHook(NULL);
++    if (s_wb_rb) {
++        s_wb_rb->lpVtbl->Release(s_wb_rb);
++        s_wb_rb = NULL;
++        s_wb_rb_size = 0;
++    }
++    memset(s_wb_stamp, 0, sizeof(s_wb_stamp));
+ 
+     wait_for_gpu();
+     UINT64 completed = s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence);

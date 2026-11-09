@@ -1,0 +1,150 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -234,9 +234,104 @@
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
+
++/* AUDIO_DEVICE_STATS=1: observations only, all updated by the mix thread.
++ * Padding zero counts queries of an empty queue, not proven underruns.
++ * Successfully released frames are queued frames, not captured playback. */
++typedef struct {
++    unsigned long long calls, failures;
++    HRESULT last_failure;
++} AudioDeviceApiStats;
++static struct {
++    int enabled, submitted_once;
++    ULONGLONG window_start;
++    LARGE_INTEGER frequency, last_submit;
++    long long max_submit_gap;
++    unsigned long long frames, padding_queries, zero_queries;
++    UINT32 minimum_padding;
++    AudioDeviceApiStats api[3]; /* padding, GetBuffer, ReleaseBuffer */
++} s_device_stats;
++
++static void audio_device_stats_init(void)
++{
++    memset(&s_device_stats, 0, sizeof(s_device_stats));
++    const char* value = getenv("AUDIO_DEVICE_STATS");
++    s_device_stats.enabled = value && *value && strcmp(value, "0") != 0;
++    if (!s_device_stats.enabled) return;
++    s_device_stats.window_start = GetTickCount64();
++    QueryPerformanceFrequency(&s_device_stats.frequency);
++    s_device_stats.minimum_padding = UINT32_MAX;
++}
++
++static void audio_device_stats_api(unsigned index, HRESULT result)
++{
++    if (!s_device_stats.enabled) return;
++    AudioDeviceApiStats* stats = &s_device_stats.api[index];
++    stats->calls++;
++    if (FAILED(result)) { stats->failures++; stats->last_failure = result; }
++}
++
++static void audio_device_stats_padding(HRESULT result, UINT32 padding)
++{
++    audio_device_stats_api(0, result);
++    if (!s_device_stats.enabled || FAILED(result) || !s_device_stats.submitted_once) return;
++    s_device_stats.padding_queries++;
++    if (padding < s_device_stats.minimum_padding) s_device_stats.minimum_padding = padding;
++    if (padding == 0) s_device_stats.zero_queries++;
++}
++
++static void audio_device_stats_submit(UINT32 frames)
++{
++    if (!s_device_stats.enabled) return;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    if (s_device_stats.submitted_once) {
++        const long long gap = now.QuadPart - s_device_stats.last_submit.QuadPart;
++        if (gap > s_device_stats.max_submit_gap) s_device_stats.max_submit_gap = gap;
++    }
++    s_device_stats.last_submit = now;
++    s_device_stats.submitted_once = 1;
++    s_device_stats.frames += frames;
++}
++
++static void audio_device_stats_report(void)
++{
++    if (!s_device_stats.enabled) return;
++    const ULONGLONG now_ms = GetTickCount64();
++    const ULONGLONG elapsed = now_ms - s_device_stats.window_start;
++    if (elapsed < 5000) return;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    const double ticks_per_ms = s_device_stats.frequency.QuadPart / 1000.0;
++    const double gap_ms = ticks_per_ms > 0 ? s_device_stats.max_submit_gap / ticks_per_ms : -1.0;
++    const double age_ms = s_device_stats.submitted_once && ticks_per_ms > 0 ?
++        (now.QuadPart - s_device_stats.last_submit.QuadPart) / ticks_per_ms : -1.0;
++    fprintf(stderr, "[audio-device] window_ms=%llu frames_queued=%llu rate=%.1f "
++            "padding_calls/fail=%llu/%llu hr=0x%08lX "
++            "get_calls/fail=%llu/%llu hr=0x%08lX "
++            "release_calls/fail=%llu/%llu hr=0x%08lX "
++            "padding_min=%lld zero_queries=%llu/%llu "
++            "max_submit_gap_ms=%.3f last_submit_age_ms=%.3f "
++            "device_buf=%u (zero_queries!=underruns; queued!=playback)\n",
++            (unsigned long long)elapsed, s_device_stats.frames,
++            s_device_stats.frames * 1000.0 / elapsed,
++            s_device_stats.api[0].calls, s_device_stats.api[0].failures,
++            (unsigned long)s_device_stats.api[0].last_failure,
++            s_device_stats.api[1].calls, s_device_stats.api[1].failures,
++            (unsigned long)s_device_stats.api[1].last_failure,
++            s_device_stats.api[2].calls, s_device_stats.api[2].failures,
++            (unsigned long)s_device_stats.api[2].last_failure,
++            s_device_stats.padding_queries ? (long long)s_device_stats.minimum_padding : -1LL,
++            s_device_stats.zero_queries, s_device_stats.padding_queries, gap_ms, age_ms,
++            (unsigned)s_wasapi_buf_frames);
++    memset(s_device_stats.api, 0, sizeof(s_device_stats.api));
++    s_device_stats.frames = s_device_stats.padding_queries = s_device_stats.zero_queries = 0;
++    s_device_stats.minimum_padding = UINT32_MAX;
++    s_device_stats.max_submit_gap = 0;
++    s_device_stats.window_start = now_ms;
++}
++
+ static int audio_backend_init(void)
+ {
+     HRESULT hr;
++    audio_device_stats_init();
+
+     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+     if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
+@@ -347,7 +442,8 @@
+     if (!s_wasapi_render) return;
+
+     UINT32 padding = 0;
+-    s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    const HRESULT padding_hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    audio_device_stats_padding(padding_hr, padding);
+
+     UINT32 available = s_wasapi_buf_frames - padding;
+     if (num_samples > available) {
+@@ -358,9 +454,12 @@
+
+     BYTE* buf = NULL;
+     HRESULT hr = s_wasapi_render->lpVtbl->GetBuffer(s_wasapi_render, num_samples, &buf);
++    audio_device_stats_api(1, hr);
+     if (SUCCEEDED(hr) && buf) {
+         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+-        s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples, 0);
++        const HRESULT release_hr = s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples, 0);
++        audio_device_stats_api(2, release_hr);
++        if (SUCCEEDED(release_hr)) audio_device_stats_submit(num_samples);
+     }
+ }
+
+@@ -370,6 +469,7 @@
+     if (!s_wasapi_client) return -1;
+     UINT32 padding = 0;
+     const HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
++    audio_device_stats_padding(hr, padding);
+     if (FAILED(hr)) {
+         /* Device gone (AUDCLNT_E_DEVICE_INVALIDATED on a default-device
+          * change, sleep, ...): pace on the clock rather than spin. */
+@@ -549,6 +649,9 @@
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
+     while (s_mix_thread_running) {
++#if AUDIO_BACKEND_WASAPI
++        audio_device_stats_report();
++#endif
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+         if (room < 0) {

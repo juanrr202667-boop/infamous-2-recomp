@@ -1,0 +1,20 @@
+--- a/libs/video/rsx_d3d12_surface_metadata.h
++++ b/libs/video/rsx_d3d12_surface_metadata.h
+@@ -7,6 +7,7 @@
+ typedef struct rsx_d3d12_surface_metadata {
+     u32 valid; /* State was available; this is not layout validation. */
+     u32 color_offset[4], color_pitch[4];
++    u32 color_dma[4], zeta_dma, dma_seen; /* Raw handles and observation bits. */
+     u32 clip_x, clip_y, clip_w, clip_h;
+     u32 scissor_x, scissor_y, scissor_w, scissor_h;
+     u32 color_target;
+@@ -28,6 +29,9 @@
+     out->valid = 1;
+     memcpy(out->color_offset, state->surface_color_offset, sizeof(out->color_offset));
+     memcpy(out->color_pitch, state->surface_color_pitch, sizeof(out->color_pitch));
++    memcpy(out->color_dma, state->surface_color_dma, sizeof(out->color_dma));
++    out->zeta_dma = state->surface_zeta_dma;
++    out->dma_seen = state->surface_dma_seen;
+     out->clip_x = state->surface_clip_x;
+     out->clip_y = state->surface_clip_y;
+     out->clip_w = state->surface_clip_w;

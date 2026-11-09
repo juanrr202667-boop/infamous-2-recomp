@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>inFAMOUS 2 · local progress</title>
+<style>
+:root{color-scheme:light;--paper:#e9eef3;--ink:#132b40;--blue:#145f8c;--muted:#526677;--line:#c9d4de;--amber:#945f19;--white:#fff;--green:#286448;--red:#a2373d}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Segoe UI",Arial,sans-serif}header{padding:23px 5vw 20px;background:var(--ink);color:var(--white);display:flex;align-items:baseline;justify-content:space-between;gap:16px}h1{font:600 25px/1.2 Bahnschrift,"Segoe UI",sans-serif;letter-spacing:.03em;margin:0}header small{color:#c9d9e6;font-size:12px}.shell{max-width:1600px;margin:auto;padding:25px 5vw}.stage{border-left:4px solid var(--blue);padding:0 0 0 16px;margin-bottom:24px}.eyebrow{margin:0 0 4px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}h2{font:600 23px/1.25 Bahnschrift,"Segoe UI",sans-serif;margin:0 0 6px}.stage p{margin:4px 0;color:var(--muted)}.workspace{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(270px,1fr);gap:24px;align-items:start}figure{margin:0;background:var(--ink);position:relative;min-height:300px;display:flex;flex-direction:column;justify-content:center}figure img{display:block;width:100%;height:auto;max-height:67vh;object-fit:contain;background:#0b1925}figure .empty{color:#d6e0e8;text-align:center;padding:70px 24px}figcaption{background:var(--white);padding:14px 17px;border:1px solid var(--line);border-top:0}.capture-title{display:flex;justify-content:space-between;gap:15px;align-items:baseline}.capture-title strong{font-weight:650}.notice{font-size:12px;color:var(--muted);margin-top:4px}.age{font:12px Consolas,monospace;color:var(--muted)}aside{background:var(--white);border:1px solid var(--line);padding:19px}.activity{font-weight:650;font-size:15px;color:var(--amber);margin-bottom:8px}.activity.active{color:var(--green)}.run-id{overflow-wrap:anywhere;font:11px Consolas,monospace;color:var(--muted);margin-bottom:15px}dl{margin:0}dl>div{display:flex;justify-content:space-between;gap:20px;padding:8px 0;border-bottom:1px solid #e6ebef}dt{color:var(--muted)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}section.test{margin-top:20px}h3{font-size:14px;margin:0 0 7px}.result{font-weight:650;margin:0 0 5px}.passed{color:var(--green)}.failed{color:var(--red)}.test-summary{font:12px/1.6 Consolas,monospace;overflow-wrap:anywhere;margin:5px 0;color:var(--ink)}details{margin-top:23px;background:var(--white);border:1px solid var(--line)}summary{padding:12px 16px;cursor:pointer;font-weight:600}summary:focus-visible{outline:3px solid var(--blue);outline-offset:3px}pre{font:12px/1.6 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 16px 16px;max-height:270px;overflow:auto;margin:0}footer{margin-top:17px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:16px}.connection-error{color:var(--red)}[hidden]{display:none!important}@media(max-width:900px){.workspace{grid-template-columns:1fr}header{align-items:start;flex-direction:column;gap:6px}.shell{padding-top:20px}figure{min-height:180px}figure img{max-height:none}footer{flex-direction:column;gap:4px}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<header><h1>inFAMOUS 2 / local progress</h1><small>Artifact observations · refreshes every 1.5 s</small></header>
+<main class="shell">
+<section class="stage" aria-labelledby="stage"><p class="eyebrow">Current stage</p><h2 id="stage">Loading progress…</h2><p id="detail"></p><p class="age" id="stage-time"></p></section>
+<div class="workspace">
+<figure>
+<div class="empty" id="empty">Waiting for a capture from the latest run.</div>
+<img id="capture" alt="Latest backbuffer captured by the native port" hidden>
+<figcaption><div class="capture-title"><strong id="capture-label">No capture available</strong><span class="age" id="capture-frame"></span></div><div class="notice" id="capture-time"></div><div class="notice">Single capture; not continuous video.</div></figcaption>
+</figure>
+<aside aria-label="Run indicators">
+<div class="activity" id="activity">Waiting for run data</div><div class="run-id" id="run-id"></div>
+<dl><div><dt>Observed duration</dt><dd id="duration">—</dd></div><div><dt>Intro</dt><dd id="intro">—</dd></div><div><dt>Intro frame</dt><dd id="intro-frame">—</dd></div><div><dt>Recorded captures</dt><dd id="capture-count">—</dd></div><div><dt>Guest frames</dt><dd id="guest-frames">—</dd></div><div><dt>Status updated</dt><dd class="age" id="status-time">—</dd></div></dl>
+<section class="test"><h3>Latest recorded test</h3><p class="result" id="test-result">No result available</p><p class="test-summary" id="test-summary"></p><p class="age" id="test-time"></p></section>
+</aside>
+</div>
+<details><summary>Latest run log lines</summary><pre id="log">No log available.</pre></details>
+<footer><span id="connection" role="status" aria-live="polite">Connecting to local dashboard…</span><span>Menu and gameplay require separate verification.</span></footer>
+</main>
+<script>
+const byId=id=>document.getElementById(id);
+const put=(id,value)=>{const node=byId(id);const text=value??'—';if(node.textContent!==String(text))node.textContent=text;};
+const date=value=>value?new Date(value).toLocaleString('en-US'):'time unavailable';
+const duration=value=>typeof value==='number'?`${Math.floor(value/60)} min ${Math.floor(value%60)} s`:'—';
+const integer=value=>typeof value==='number'?value.toLocaleString('en-US'):'—';
+let imageVersion='';
+async function refresh(){
+ try{
+  const response=await fetch('/api/status',{cache:'no-store'});
+  if(!response.ok)throw new Error('status');
+  const data=await response.json();const run=data.run;const image=data.image;
+  put('stage',data.stage.title);put('detail',data.stage.detail);
+  put('stage-time',`${data.stage.candidate?`Candidate ${data.stage.candidate} · `:''}${date(data.stage.updated_at)}`);
+  put('activity',run?.activity_label||'No run recorded');byId('activity').className=`activity${run?.active?' active':''}`;
+  put('run-id',run?.id||'');put('duration',duration(run?.duration_seconds));
+  put('intro',run?.intro?.intro_eof_observed?'EOF observed':run?.intro?.intro_opened?'Playing':'Not observed');
+  put('intro-frame',integer(run?.intro?.last_intro_frame));put('capture-count',integer(run?.intro?.rsx_capture_count));
+  put('guest-frames',integer(data.metrics?.graphics?.guest_frames));put('status-time',run?.updated_at?new Date(run.updated_at).toLocaleTimeString('en-US'):'—');
+  const results={passed:'Passed',failed:'Failed',running:'Running',unknown:'No conclusive result'};
+  put('test-result',results[data.gate.result]||results.unknown);byId('test-result').className=`result ${data.gate.result}`;
+  put('test-summary',data.gate.summary);put('test-time',`${date(data.gate.updated_at)}${data.gate.source?' · '+data.gate.source:''}`);
+  if(image){
+   byId('empty').hidden=true;byId('capture').hidden=false;
+   if(image.url!==imageVersion){byId('capture').src=image.url;imageVersion=image.url;}
+   put('capture-label',image.label);put('capture-frame',`${image.frame} · ${image.width} × ${image.height}`);
+   put('capture-time',`${date(image.updated_at)} · ${duration(image.age_seconds)} ago`);
+  }else{
+   byId('empty').hidden=false;byId('capture').hidden=true;byId('capture').removeAttribute('src');imageVersion='';
+   put('capture-label','No capture from the latest run');put('capture-frame','');put('capture-time','An image appears after the current run produces a capture.');
+  }
+  put('log',data.log.text||'No log available.');
+  put('connection',`Data checked at ${new Date(data.observed_at).toLocaleTimeString('en-US')}${data.log.truncated?' · log tail only':''}`);
+  byId('connection').className='';
+ }catch(error){put('connection','Dashboard update failed. Visible data is from the last check.');byId('connection').className='connection-error';}
+ setTimeout(refresh,1500);
+}
+refresh();
+</script>
+</body>
+</html>

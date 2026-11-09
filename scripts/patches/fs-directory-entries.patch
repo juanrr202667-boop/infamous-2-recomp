@@ -1,0 +1,83 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index e8f6c2b..0a6985f 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -16,6 +16,7 @@
+ #include "ppu_recomp.h"      /* ppu_context */
+ #include "../../libs/filesystem/edat.h"
+ #include "ps3emu/nid.h"      /* ps3_compute_nid */
++#include "ps3emu/error_codes.h"
+ #include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
+ #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
+ #include <stdint.h>
+@@ -50,7 +51,6 @@ extern "C" void     vm_write64(uint64_t a, uint64_t v);
+ extern "C" const char* ppu_vfs_root = ".";
+ 
+ /* CELL_FS return / mode / flag constants. */
+-#define CELL_OK              0
+ #define CELL_FS_ENOENT       (-2147418106)   /* 0x80010006 -- was -2147418090, which is 0x80010016 = CELL_ENOTCONN, not ENOENT */
+ #define CELL_FS_EISDIR       (-2147418094)   /* 0x80010012 */
+ #define CELL_FS_EIO          (-2147418111)
+@@ -649,6 +649,54 @@ static void cellFsClosedir(ppu_context* ctx)
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
++/* CellFsDirectoryEntry: packed 52-byte stat, 2 dirent bytes, name[256],
++ * then 2 bytes of tail padding for 4-byte alignment: 312 (0x138) bytes.
++ * Unlike Readdir's u64 byte count, GetDirectoryEntries writes a u32 ENTRY
++ * count. BCUS98125 puts its live fd immediately after that count. */
++static void cellFsGetDirectoryEntries(ppu_context* ctx)
++{
++    constexpr uint32_t stride = 52 + 2 + 256 + 2;
++    static_assert(stride == 312);
++    int fd = (int)(uint32_t)ctx->gpr[3];
++    uint64_t entries = ctx->gpr[4], length = ctx->gpr[5], count_ptr = ctx->gpr[6];
++    uint64_t limit = ppu_vm_size ? ppu_vm_size : 0x100000000ull;
++    // Reject before readdir: bad arguments must not consume the directory.
++    if (fd < 0 || fd >= FS_MAX || !g_dirs[fd]) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EBADF; return;
++    }
++    if (length < stride || length > UINT32_MAX) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EINVAL; return;
++    }
++    if (!entries || !count_ptr || entries > UINT32_MAX || count_ptr > UINT32_MAX ||
++        entries + length > limit || count_ptr + 4 > limit) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EFAULT; return;
++    }
++    uint32_t count = 0;
++    for (; count < length / stride; ++count) {
++        struct dirent* e = readdir(g_dirs[fd]);
++        if (!e) break;
++        char full[1300]; struct stat st;
++        snprintf(full, sizeof full, "%s/%s", g_dir_path[fd], e->d_name);
++        if (stat(full, &st)) {
++            ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return;
++        }
++        bool directory = (st.st_mode & S_IFDIR) != 0;
++        uint32_t destination = (uint32_t)entries + count * stride;
++        memset(vm_base + destination, 0, stride);
++        write_stat(destination, directory ? (CELL_FS_S_IFDIR | 0x1FF)
++                                          : (CELL_FS_S_IFREG | 0x1B6), (uint64_t)st.st_size);
++        vm_write64(destination + 0x0C, (uint64_t)st.st_atime);
++        vm_write64(destination + 0x14, (uint64_t)st.st_mtime);
++        vm_write64(destination + 0x1C, (uint64_t)st.st_ctime);
++        size_t nl = strlen(e->d_name); if (nl > 255) nl = 255;
++        vm_base[destination + 52] = directory ? CELL_FS_TYPE_DIR : CELL_FS_TYPE_REG;
++        vm_base[destination + 53] = (uint8_t)nl;
++        memcpy(vm_base + destination + 54, e->d_name, nl);
++    }
++    vm_write32(count_ptr, count);
++    ctx->gpr[3] = CELL_OK;
++}
++
+ #ifdef _WIN32
+ #include <direct.h>
+ #define HOST_MKDIR(p) _mkdir(p)
+@@ -788,6 +836,7 @@ extern "C" void ppu_fs_register(void)
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsFstat"),    "cellFsFstat",    cellFsFstat);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsOpendir"),  "cellFsOpendir",  cellFsOpendir);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsReaddir"),  "cellFsReaddir",  cellFsReaddir);
++    ps3_hle_register_ctx(0x9B882495u, "cellFsGetDirectoryEntries", cellFsGetDirectoryEntries);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsClosedir"), "cellFsClosedir", cellFsClosedir);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsMkdir"),    "cellFsMkdir",    cellFsMkdir);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsRmdir"),    "cellFsRmdir",    cellFsRmdir);

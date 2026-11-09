@@ -1,0 +1,30 @@
+diff --git "a/runtime/ppu/ppu_loader.cpp" "b/runtime/ppu/ppu_loader.cpp"
+index d15e253..aa1b8f7 100644
+--- "a/runtime/ppu/ppu_loader.cpp"
++++ "b/runtime/ppu/ppu_loader.cpp"
+@@ -617,6 +617,7 @@ static void samp_report(void)
+  * guest histogram says nothing about where it loops. */
+ static DWORD s_samp_boot_tid;
+ static int   s_samp_main = -1;
++static int   s_samp_direct_only = 0;
+ 
+ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+ {
+@@ -659,7 +660,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
+                     if (GetThreadContext(h, &c)) {
+                         s_samp_total++;
+                         uint32_t g = samp_lookup((uintptr_t)c.Rip);
+-                        if (!g && s_samp_main > 0) g = samp_stack_guest(h, &c);
++                        if (!g && s_samp_main > 0 && !s_samp_direct_only) g = samp_stack_guest(h, &c);
+                         if (g) { s_samp_guest++; samp_hit(g); samp_tid_hit(te.th32ThreadID);
+                                  samp_tid2(te.th32ThreadID, 1, 0); }
+                         else { int nt = samp_mod_hit((uintptr_t)c.Rip);
+@@ -734,6 +735,8 @@ void ps3_sampler_start(void)
+     unsigned ms = (unsigned)atoi(e); if (!ms) ms = 5;
+     s_samp_boot_tid = GetCurrentThreadId();
+     s_samp_main = getenv("PS3_SAMPLE_MAIN") ? 1 : 0;
++    { const char* direct = getenv("PS3_SAMPLE_DIRECT_ONLY");
++      s_samp_direct_only = direct && strcmp(direct, "1") == 0; }
+     /* Self-check: does .pdata actually describe the lifted bodies? If not, the
+      * exact attribution mode misses ALL guest code by construction and its "0
+      * guest samples" means nothing. Print it rather than assume either way. */

@@ -1,0 +1,37 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1469,12 +1469,16 @@
+     const rsx_d3d12_surface_metadata* m = record->is_vp ? &record->surface_meta : &absent;
+     fprintf(out, " surface_valid=%u pitch=%u/%u/%u/%u raw_rt=0x%X/0x%X/0x%X/0x%X"
+                  " clip=%u,%u,%ux%u scissor=%u,%u,%ux%u target=0x%X"
+-                 " clear_flags=0x%X clear_depth=%.9g clear_stencil=0x%X surface_dma=unobserved\n",
++                 " clear_flags=0x%X clear_depth=%.9g clear_stencil=0x%X surface_dma=%s"
++                 " dma_seen=0x%X color_dma=0x%X/0x%X/0x%X/0x%X zeta_dma=0x%X\n",
+             m->valid, m->color_pitch[0], m->color_pitch[1], m->color_pitch[2], m->color_pitch[3],
+             m->color_offset[0], m->color_offset[1], m->color_offset[2], m->color_offset[3],
+             m->clip_x, m->clip_y, m->clip_w, m->clip_h,
+             m->scissor_x, m->scissor_y, m->scissor_w, m->scissor_h,
+-            m->color_target, m->clear_flags, (double)m->clear_depth, m->clear_stencil);
++            m->color_target, m->clear_flags, (double)m->clear_depth, m->clear_stencil,
++            !m->dma_seen ? "unobserved" : ((m->dma_seen & 31u) == 31u ? "observed" : "partial"),
++            m->dma_seen, m->color_dma[0], m->color_dma[1], m->color_dma[2], m->color_dma[3],
++            m->zeta_dma);
+ }
+ 
+ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+@@ -1515,13 +1519,13 @@
+                 write_surface_metadata(mf, r);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+-                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X format_word=0x%08X control3=0x%08X pitch=%u\n", u,
++                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X format_word=0x%08X control3=0x%08X pitch=%u raw=0x%08X\n", u,
+                                 r->tex[u].off, r->tex[u].fmt,
+                                 (r->tex[u].fmt & 0x20) ? "LN" : "SZ",
+                                 (r->tex[u].fmt & 0x40) ? ",NR" : "",
+                                 r->tex[u].w, r->tex[u].h, r->tex[u].ctrl1 & 0xFFFF,
+                                 r->tex[u].format_word, r->tex[u].ctrl3,
+-                                r->tex[u].ctrl3 & 0xFFFFFu);
++                                r->tex[u].ctrl3 & 0xFFFFFu, r->tex[u].raw);
+             }
+         }
+         /* Per-draw VP constant banks for the first few offscreen-RT geometry

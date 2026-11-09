@@ -1,0 +1,35 @@
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -25,6 +25,11 @@
+ #define FP_INPUT_SRC_MASK   (15u << 13)
+ #define FP_TEX_UNIT_SHIFT   17
+ #define FP_TEX_UNIT_MASK    (15u << 17)
++/* DWORD0 bit 21 on a fetch opcode: EXP_TEX, the _bx2 modifier. The texture
++ * unit field ends at bit 20, so the bit is free on fetches. The sample then
++ * returns x*2-1 on every lane (RPCS3 FragmentProgramDecompiler, _process_texel;
++ * the same rule the upstream ps3recomp applies from every entry point). */
++#define FP_TEX_EXP_TEX      (1u << 21)
+ #define FP_OPCODE_SHIFT     24
+ #define FP_OPCODE_MASK      (0x3Fu << 24)
+ #define FP_OUT_NONE         (1u << 30)
+@@ -812,6 +817,20 @@
+             break;
+         }
+ 
++        /* EXP_TEX (_bx2): a fetch whose destination word carries bit 21 returns
++         * x*2-1 on every lane (RPCS3 FragmentProgramDecompiler, _process_texel).
++         * Applies to every texture opcode, predicated or not; no other opcode
++         * uses that bit, but the guard keeps non-fetch programs byte-identical. */
++        if (handled && (w0 & FP_TEX_EXP_TEX) &&
++            (opcode == OP_TEX || opcode == OP_TXP || opcode == OP_TXD ||
++             opcode == OP_TXB || opcode == OP_TXL)) {
++            char expanded[sizeof(rhs)];
++            int expanded_len = snprintf(expanded, sizeof(expanded),
++                                        "((%s) * 2.0 - 1.0)", rhs);
++            if (expanded_len > 0 && (size_t)expanded_len < sizeof(expanded))
++                memcpy(rhs, expanded, (size_t)expanded_len + 1);
++        }
++
+         int has_dest = !(w0 & FP_OUT_NONE);
+         if (handled && (has_dest || set_cond)) {
+             u32 dst_idx = (w0 & FP_OUT_REG_MASK) >> FP_OUT_REG_SHIFT;

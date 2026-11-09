@@ -1,0 +1,14 @@
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1526,8 +1526,9 @@
+     for (unsigned slot = 0; slot < 4; ++slot) {
+         if (ctx->resident_code[slot].image_id && lsa >= ctx->resident_code[slot].lsa &&
+             lsa - ctx->resident_code[slot].lsa < ctx->resident_code[slot].size) {
+-            spu_fn f = spu_lookup(lsa, ctx->resident_code[slot].image_id);
+-            if (f) return (spu_lifted_fn)f;
++            /* Ownership blocks stale lifts even when this image has no lift:
++             * the interpreter must execute the bytes currently in LS. */
++            return (spu_lifted_fn)spu_lookup(lsa, ctx->resident_code[slot].image_id);
+         }
+     }
+     if (ctx->resident_task) {

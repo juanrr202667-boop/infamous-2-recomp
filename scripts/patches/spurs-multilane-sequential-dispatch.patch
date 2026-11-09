@@ -1,0 +1,20 @@
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -1699,8 +1699,17 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+             {
+                 const uint8_t* pm = (const uint8_t*)vm_base + (uint32_t)(uintptr_t)s_workloads[wid].pm;
+                 uint32_t sz = s_workloads[wid].sizePm;
++                static int s_pm_seq = -1;
++                if (s_pm_seq < 0) s_pm_seq = getenv("SPURS_PM_PARALLEL") ? 0 : 1;
+                 if (maxcont <= 1) {
+                     spu_run_policy_module(r->fn, r->image_id, pm, sz, arg, wid, ea, 0);
++                } else if (s_pm_seq) {
++                    /* Sequential multi-lane dispatch: runs virtual SPUs 0..maxcont-1
++                     * in order on this thread without CreateThread churn or atomic races.
++                     * Advances all lanes so cross-SPU barrier resolves deterministically. */
++                    for (u32 sn = 0; sn < maxcont; sn++) {
++                        spu_run_policy_module(r->fn, r->image_id, pm, sz, arg, wid, ea, sn);
++                    }
+                 } else {
+                     /* Run the workload's virtual SPUs CONCURRENTLY (see
+                      * spurs_pm_worker): each lane advances in parallel so the

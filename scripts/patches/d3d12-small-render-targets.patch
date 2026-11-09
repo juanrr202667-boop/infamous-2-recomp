@@ -1,0 +1,38 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1479,16 +1479,17 @@
+         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; d++) {
+             const D3D12DrawRecord* r = &s_d3d.draws[d];
+             if (r->is_clear)
+-                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f)\n",
++                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f) rt_size=%ux%u rt_fmt=0x%X\n",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+-                        r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
++                        r->cc[0], r->cc[1], r->cc[2], r->cc[3], r->rt_w, r->rt_h, r->rt_fmt);
+             else {
+                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
+-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
++                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X rt_size=%ux%u rt_fmt=0x%X\n",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+-                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
++                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw,
++                        r->rt_w, r->rt_h, r->rt_fmt);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
+@@ -3249,10 +3250,10 @@
+       if (_bs && st->color_target < 0x13 &&
+           st->surface_clip_w == s_d3d.width && st->surface_clip_h == s_d3d.height)
+           return 0; }
+-    /* Surface clip dims when sane; else the window size. Any size works --
+-     * passes draw normalized full-surface quads -- this only picks resolution. */
++    /* Preserve small targets used by downsampling chains, including 1x1.
++     * Zero or oversized clip dimensions retain the window-size fallback. */
+     u32 w = st->surface_clip_w, h = st->surface_clip_h;
+-    if (w < 16 || w > 2048 || h < 16 || h > 2048) { w = 0; h = 0; }
++    if (!w || w > 2048 || !h || h > 2048) { w = 0; h = 0; }
+     if (out_w) *out_w = w;
+     if (out_h) *out_h = h;
+     return raw;

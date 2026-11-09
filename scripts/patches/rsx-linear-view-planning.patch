@@ -1,0 +1,115 @@
+--- /dev/null
++++ b/libs/video/rsx_linear_catalog.h
+@@ -0,0 +1,41 @@
++#ifndef RSX_LINEAR_CATALOG_H
++#define RSX_LINEAR_CATALOG_H
++
++#include "rsx_linear_coherence.h"
++
++enum { RSX_LINEAR_CATALOG_FULL = -4 };
++
++/* Reserve a stable index in the caller-owned contiguous catalog [0, count).
++ * Hits preserve content epochs. New entries start at epoch zero; the caller
++ * still owns seeding, content validity, GPU resources and lifetime. No entry
++ * is evicted and no output changes on failure. count and slot must differ. */
++static inline int rsx_linear_reserve_view(rsx_linear_version* views,
++        uint32_t capacity, uint32_t* count, const rsx_linear_view* view,
++        uint32_t* slot)
++{
++    if (!views || !count || !view || !slot || count == slot)
++        return RSX_LINEAR_BAD_VIEW;
++    const uint32_t n = *count;
++    if (n > capacity || !rsx_linear_view_valid(view))
++        return RSX_LINEAR_BAD_VIEW;
++
++    for (uint32_t i = 0; i < n; ++i) {
++        const rsx_linear_view* existing = &views[i].view;
++        if (existing->offset == view->offset && existing->width == view->width &&
++                existing->height == view->height && existing->pitch == view->pitch &&
++                existing->bytes_per_pixel == view->bytes_per_pixel &&
++                existing->format_id == view->format_id && existing->location == view->location) {
++            *slot = i;
++            return RSX_LINEAR_OK;
++        }
++    }
++    if (n == capacity) return RSX_LINEAR_CATALOG_FULL;
++
++    views[n].view = *view;
++    views[n].complete_at = 0;
++    *count = n + 1u;
++    *slot = n;
++    return RSX_LINEAR_OK;
++}
++
++#endif
+--- /dev/null
++++ b/libs/video/rsx_linear_metadata.h
+@@ -0,0 +1,68 @@
++#ifndef RSX_LINEAR_METADATA_H
++#define RSX_LINEAR_METADATA_H
++
++#include "rsx_linear_view.h"
++#include "rsx_d3d12_surface_metadata.h"
++
++enum {
++    RSX_LINEAR_META_OK = 0,
++    RSX_LINEAR_META_ABSENT = -10,
++    RSX_LINEAR_META_UNKNOWN_DMA = -11,
++    RSX_LINEAR_META_UNSUPPORTED = -12,
++    RSX_LINEAR_META_INVALID = -13
++};
++
++/* Decode declared linear RGBA8 geometry only. Tile/compression state, CPU
++ * writes, GPU seed bounds and resource ownership require separate validation.
++ * A successful result is not proof that arbitrary RSX aliasing is supported. */
++static inline int rsx_declared_surface_linear(const rsx_d3d12_surface_metadata* m,
++        uint32_t surface_format, uint32_t member, rsx_linear_view* out)
++{
++    if (!out) return RSX_LINEAR_META_INVALID;
++    if (!m || !m->valid) return RSX_LINEAR_META_ABSENT;
++    if (member >= 4) return RSX_LINEAR_META_INVALID;
++    if (!(m->dma_seen & (1u << member))) return RSX_LINEAR_META_UNKNOWN_DMA;
++    uint32_t domain;
++    if (m->color_dma[member] == 0xFEED0000u) domain = 1;
++    else if (m->color_dma[member] == 0xFEED0001u) domain = 2;
++    else return RSX_LINEAR_META_UNKNOWN_DMA;
++    if ((surface_format & 0x1Fu) != 8 || ((surface_format >> 8) & 15u) != 1 ||
++            ((surface_format >> 12) & 15u) != 0) return RSX_LINEAR_META_UNSUPPORTED;
++    /* The first adapter does not infer a backing extent from a clip origin. */
++    if (m->clip_x || m->clip_y) return RSX_LINEAR_META_UNSUPPORTED;
++
++    uint64_t width = m->clip_w;
++    uint64_t height = m->clip_h;
++    if (!m->clip_w || !m->clip_h || width > UINT32_MAX || height > UINT32_MAX)
++        return RSX_LINEAR_META_INVALID;
++    rsx_linear_view view = {0};
++    view.offset = m->color_offset[member];
++    view.width = (uint32_t)width; view.height = (uint32_t)height;
++    view.pitch = m->color_pitch[member]; view.bytes_per_pixel = 4;
++    view.format_id = 0x85; view.location = domain;
++    if (!rsx_linear_view_valid(&view)) return RSX_LINEAR_META_INVALID;
++    *out = view;
++    return RSX_LINEAR_META_OK;
++}
++
++static inline int rsx_declared_texture_linear(uint32_t offset, uint32_t width,
++        uint32_t height, uint32_t format_word, uint32_t control3,
++        rsx_linear_view* out)
++{
++    if (!out) return RSX_LINEAR_META_INVALID;
++    uint32_t domain = format_word & 3u;
++    if (domain != 1 && domain != 2) return RSX_LINEAR_META_UNKNOWN_DMA;
++    uint32_t format = (format_word >> 8) & 255u;
++    if ((format & 0x9Fu) != 0x85 || !(format & 0x20u) || (format_word & 4u) ||
++            ((format_word >> 4) & 15u) != 2 || (format_word >> 16) != 1 ||
++            (control3 >> 20) != 1) return RSX_LINEAR_META_UNSUPPORTED;
++    rsx_linear_view view = {0};
++    view.offset = offset; view.width = width; view.height = height;
++    view.pitch = control3 & 0xFFFFFu; view.bytes_per_pixel = 4;
++    view.format_id = 0x85; view.location = domain;
++    if (!rsx_linear_view_valid(&view)) return RSX_LINEAR_META_INVALID;
++    *out = view;
++    return RSX_LINEAR_META_OK;
++}
++
++#endif

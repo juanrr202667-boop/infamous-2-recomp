@@ -1,0 +1,56 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -806,9 +806,49 @@ static void cellFsAioRead(ppu_context* ctx)
+         fs_prefault(buf, size);
+         /* AIO reads are absolute -- they do not disturb the fd's own file
+          * position, and the guest interleaves them freely across threads. */
+-        if (HOST_FSEEK64(g_files[fd], offset) == 0)
+-            n = fread(vm_base + buf, 1, (size_t)size, g_files[fd]);
+-        err = CELL_OK;
++#ifdef _WIN32
++        int fno = _fileno(g_files[fd]);
++        HANDLE h = (fno >= 0) ? (HANDLE)_get_osfhandle(fno) : INVALID_HANDLE_VALUE;
++        if (h != INVALID_HANDLE_VALUE) {
++            uint8_t* dst = vm_base + buf;
++            uint64_t remaining = size;
++            uint64_t cur_off = offset;
++            err = CELL_OK;
++            while (remaining > 0) {
++                DWORD to_read = (remaining > 0x40000000u) ? 0x40000000u : (DWORD)remaining;
++                OVERLAPPED ov;
++                memset(&ov, 0, sizeof(ov));
++                ov.Offset = (DWORD)(cur_off & 0xFFFFFFFFu);
++                ov.OffsetHigh = (DWORD)(cur_off >> 32);
++                DWORD read_bytes = 0;
++                if (!ReadFile(h, dst, to_read, &read_bytes, &ov)) {
++                    DWORD werr = GetLastError();
++                    if (werr == ERROR_HANDLE_EOF) break;
++                    if (n == 0) err = CELL_FS_EIO;
++                    break;
++                }
++                if (read_bytes == 0) break;
++                n += read_bytes;
++                dst += read_bytes;
++                cur_off += read_bytes;
++                remaining -= read_bytes;
++                if (read_bytes < to_read) break;
++            }
++        } else {
++            err = CELL_FS_EIO;
++        }
++#else
++        int fno = fileno(g_files[fd]);
++        if (fno >= 0) {
++            uint8_t* dst = vm_base + buf;
++            size_t to_read = (size > 0x40000000u) ? (size_t)0x40000000u : (size_t)size;
++            ssize_t res = pread(fno, dst, to_read, (off_t)offset);
++            if (res >= 0) { n = (size_t)res; err = CELL_OK; }
++            else { err = CELL_FS_EIO; }
++        } else {
++            err = CELL_FS_EIO;
++        }
++#endif
+     }
+     if (getenv("PS3_FSLOG"))
+         fprintf(stderr, "[fs] aio read id=%d fd=%d off=%llu size=%llu -> %zu\n",

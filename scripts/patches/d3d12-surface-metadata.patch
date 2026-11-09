@@ -1,0 +1,218 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -40,6 +40,7 @@
+ #include <dxgi1_6.h>
+ #include <d3dcompiler.h>
+ #include "rsx_d3d12_guest_pipeline.h"
++#include "rsx_d3d12_surface_metadata.h"
+ 
+ /* We need these GUIDs — define them here to avoid uuid.lib dependency */
+ #include <initguid.h>
+@@ -98,6 +99,7 @@
+         u32 raw;        /* raw RSX offset (offscreen-RT matching) */
+         u32 w, h, fmt;  /* dims + RSX base format */
+         u32 ctrl1;      /* NV4097 TEXTURE_CONTROL1: component remap crossbar */
++        u32 ctrl3, format_word; /* preserve declared pitch/depth and DMA/layout bits */
+         u32 mips;       /* SET_TEXTURE_FORMAT bits 16..31: mipmap level count.
+                          * Cube faces sit one whole mip pyramid apart, so this
+                          * is what sets the face stride. */
+@@ -127,6 +129,7 @@
+                          * shading G-buffers write 3-4 targets in one pass. */
+     u32 rt_w, rt_h;     /* surface clip dims at record time (offscreen RT size) */
+     u32 rt_fmt;         /* RSX surface colour format (SET_SURFACE_FORMAT [4:0]) */
++    rsx_d3d12_surface_metadata surface_meta; /* immutable record-time state */
+     /* Guest viewport rect at draw time (target pixels). Sub-viewport layouts
+      * (wave's debug tiles) position quads with this, not with constants --
+      * forcing full-target viewports drew every tile window-sized. */
+@@ -314,7 +317,7 @@
+     int                   vp_fp_n;
+     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
+     /* VP path: latest texture bound per unit (t0-t15). */
+-    struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
++    struct { u32 off, raw, w, h, fmt, ctrl1, ctrl3, format_word, mips; int cube; int set; } cur_texs[RSX_MAX_TEXTURES];
+ 
+     /* Render-to-texture: offscreen RT pool + their RTV heap. */
+     OffRT                 off_rt[MAX_OFF_RTS];
+@@ -1460,6 +1463,20 @@
+     rb->lpVtbl->Release(rb);
+ }
+ 
++static void write_surface_metadata(FILE* out, const D3D12DrawRecord* record)
++{
++    const rsx_d3d12_surface_metadata absent = {0};
++    const rsx_d3d12_surface_metadata* m = record->is_vp ? &record->surface_meta : &absent;
++    fprintf(out, " surface_valid=%u pitch=%u/%u/%u/%u raw_rt=0x%X/0x%X/0x%X/0x%X"
++                 " clip=%u,%u,%ux%u scissor=%u,%u,%ux%u target=0x%X"
++                 " clear_flags=0x%X clear_depth=%.9g clear_stencil=0x%X surface_dma=unobserved\n",
++            m->valid, m->color_pitch[0], m->color_pitch[1], m->color_pitch[2], m->color_pitch[3],
++            m->color_offset[0], m->color_offset[1], m->color_offset[2], m->color_offset[3],
++            m->clip_x, m->clip_y, m->clip_w, m->clip_h,
++            m->scissor_x, m->scissor_y, m->scissor_w, m->scissor_h,
++            m->color_target, m->clear_flags, (double)m->clear_depth, m->clear_stencil);
++}
++
+ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+ {
+     char dir[300]; const char* base = getenv("RSX_CAP_DIR");
+@@ -1482,25 +1499,29 @@
+         fprintf(mf, "--- ops ---\n");
+         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; d++) {
+             const D3D12DrawRecord* r = &s_d3d.draws[d];
+-            if (r->is_clear)
+-                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f) rt_size=%ux%u rt_fmt=0x%X\n",
++            if (r->is_clear) {
++                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f) rt_size=%ux%u rt_fmt=0x%X",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->cc[0], r->cc[1], r->cc[2], r->cc[3], r->rt_w, r->rt_h, r->rt_fmt);
+-            else {
++                write_surface_metadata(mf, r);
++            } else {
+                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
+-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X rt_size=%ux%u rt_fmt=0x%X\n",
++                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X rt_size=%ux%u rt_fmt=0x%X",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+                         r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw,
+                         r->rt_w, r->rt_h, r->rt_fmt);
++                write_surface_metadata(mf, r);
+                 for (int u = 0; u < RSX_MAX_TEXTURES; u++)
+                     if (r->tex[u].set)
+-                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
++                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X format_word=0x%08X control3=0x%08X pitch=%u\n", u,
+                                 r->tex[u].off, r->tex[u].fmt,
+                                 (r->tex[u].fmt & 0x20) ? "LN" : "SZ",
+                                 (r->tex[u].fmt & 0x40) ? ",NR" : "",
+-                                r->tex[u].w, r->tex[u].h, r->tex[u].ctrl1 & 0xFFFF);
++                                r->tex[u].w, r->tex[u].h, r->tex[u].ctrl1 & 0xFFFF,
++                                r->tex[u].format_word, r->tex[u].ctrl3,
++                                r->tex[u].ctrl3 & 0xFFFFFu);
+             }
+         }
+         /* Per-draw VP constant banks for the first few offscreen-RT geometry
+@@ -3317,6 +3338,12 @@
+     if (out_w) *out_w = w;
+     if (out_h) *out_h = h;
+     return raw;
++}
++
++static void record_surface_metadata(D3D12DrawRecord* dr, u32 flags, float depth, u8 stencil)
++{
++    rsx_d3d12_snapshot_surface(&dr->surface_meta, s_d3d.current_rsx_state,
++                              flags, depth, stencil);
+ }
+ 
+ /* RSX surface colour format (SET_SURFACE_FORMAT bits [4:0]) -> DXGI. Float
+@@ -5295,6 +5322,7 @@
+             dr->rt_off = rt; memcpy(dr->rt_mrt, mrt, sizeof(mrt));
+             dr->rt_w = rt_w; dr->rt_h = rt_h;
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            record_surface_metadata(dr, flags, depth, stencil);
+             memcpy(dr->cc, cc, sizeof(cc));
+         }
+         return;
+@@ -6172,6 +6200,8 @@
+                     dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+                     dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
++                    dr->tex[_u].ctrl3 = s_d3d.cur_texs[_u].ctrl3;
++                    dr->tex[_u].format_word = s_d3d.cur_texs[_u].format_word;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+                     dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+@@ -6190,6 +6220,7 @@
+                                 dr->blend, dr->blend_key, 10); } }
+                 dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+                 dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++                record_surface_metadata(dr, 0, 1.0f, 0);
+                 if (s_d3d.current_rsx_state) {
+                     dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                     dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -6294,6 +6325,8 @@
+                 dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+                 dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
++                dr->tex[_u].ctrl3 = s_d3d.cur_texs[_u].ctrl3;
++                dr->tex[_u].format_word = s_d3d.cur_texs[_u].format_word;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+                 dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+@@ -6306,6 +6339,7 @@
+             dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+             dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+             dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++            record_surface_metadata(dr, 0, 1.0f, 0);
+             if (s_d3d.current_rsx_state) {
+                 dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+                 dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -6437,6 +6471,8 @@
+             dr->tex[_u].h   = s_d3d.cur_texs[_u].h;
+             dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
+                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
++            dr->tex[_u].ctrl3 = s_d3d.cur_texs[_u].ctrl3;
++            dr->tex[_u].format_word = s_d3d.cur_texs[_u].format_word;
+                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips;
+             dr->tex[_u].set = s_d3d.cur_texs[_u].set;
+@@ -6449,6 +6485,7 @@
+         dr->blend_key = rsx_blend_key(s_d3d.current_rsx_state, dr->blend);
+         dr->rt_off = current_rt_off(&dr->rt_w, &dr->rt_h, dr->rt_mrt);
+         dr->rt_fmt = s_d3d.current_rsx_state ? s_d3d.current_rsx_state->surface_format : 0;
++        record_surface_metadata(dr, 0, 1.0f, 0);
+         if (s_d3d.current_rsx_state) {
+             dr->vp_x = s_d3d.current_rsx_state->viewport_x;
+             dr->vp_y = s_d3d.current_rsx_state->viewport_y;
+@@ -6586,6 +6623,8 @@
+         s_d3d.cur_texs[unit].w = width; s_d3d.cur_texs[unit].h = height;
+         s_d3d.cur_texs[unit].fmt = format;   /* full byte: LN(0x20)/UN(0x40) kept */
+         s_d3d.cur_texs[unit].ctrl1 = tex->control1;
++        s_d3d.cur_texs[unit].ctrl3 = tex->control3;
++        s_d3d.cur_texs[unit].format_word = tex->format;
+         s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
+         s_d3d.cur_texs[unit].mips  = (tex->format >> 16) & 0xFFFFu;
+         if (getenv("TEXFMTDBG")) { static u32 seen[64]; static int ns=0;
+--- /dev/null
++++ b/libs/video/rsx_d3d12_surface_metadata.h
+@@ -0,0 +1,42 @@
++#ifndef RSX_D3D12_SURFACE_METADATA_H
++#define RSX_D3D12_SURFACE_METADATA_H
++
++#include "rsx_commands.h"
++#include <string.h>
++
++typedef struct rsx_d3d12_surface_metadata {
++    u32 valid; /* State was available; this is not layout validation. */
++    u32 color_offset[4], color_pitch[4];
++    u32 clip_x, clip_y, clip_w, clip_h;
++    u32 scissor_x, scissor_y, scissor_w, scissor_h;
++    u32 color_target;
++    u32 clear_flags;
++    float clear_depth;
++    u32 clear_stencil;
++} rsx_d3d12_surface_metadata;
++
++/* Copy the state at this operation, without inferring missing DMA locations. */
++static inline void rsx_d3d12_snapshot_surface(rsx_d3d12_surface_metadata* out,
++        const rsx_state* state, u32 flags, float depth, u8 stencil)
++{
++    memset(out, 0, sizeof(*out));
++    out->clear_flags = flags;
++    out->clear_depth = depth;
++    out->clear_stencil = stencil;
++    if (!state) return;
++
++    out->valid = 1;
++    memcpy(out->color_offset, state->surface_color_offset, sizeof(out->color_offset));
++    memcpy(out->color_pitch, state->surface_color_pitch, sizeof(out->color_pitch));
++    out->clip_x = state->surface_clip_x;
++    out->clip_y = state->surface_clip_y;
++    out->clip_w = state->surface_clip_w;
++    out->clip_h = state->surface_clip_h;
++    out->scissor_x = state->scissor_x;
++    out->scissor_y = state->scissor_y;
++    out->scissor_w = state->scissor_w;
++    out->scissor_h = state->scissor_h;
++    out->color_target = state->color_target;
++}
++
++#endif

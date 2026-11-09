@@ -1,0 +1,76 @@
+--- a/libs/video/rsx_fp_decompiler.h
++++ b/libs/video/rsx_fp_decompiler.h
+@@ -161,6 +161,15 @@
+  * the decompiler on where a program ends. */
+ u32 rsx_fp_program_size(const u8* ucode, u32 max_bytes);
+ 
++/* Static references to TEX/TXP/TXD/TXB/TXL units through the first END.
++ * Includes predicated instructions without evaluating control flow; skips
++ * inline CONST payloads and uses the same guest word order as the decompiler.
++ * The low 16 bits are the unit mask. Null, truncated, unterminated input or
++ * unknown instruction/flow opcodes return RSX_FP_SAMPLER_MASK_INVALID,
++ * never an empty dependency set inferred from unclassified instructions. */
++#define RSX_FP_SAMPLER_MASK_INVALID 0xFFFFFFFFu
++u32 rsx_fp_sampler_used_mask(const u8* ucode, u32 max_bytes);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/libs/video/rsx_fp_decompiler.c
++++ b/libs/video/rsx_fp_decompiler.c
+@@ -137,6 +137,55 @@
+             FP_REG_TYPE_CONST ||
+         ((w3 & FP_REG_TYPE_MASK) >> FP_REG_TYPE_SHIFT) ==
+             FP_REG_TYPE_CONST;
++}
++
++u32 rsx_fp_sampler_used_mask(const u8* ucode, u32 max_bytes)
++{
++    if (!ucode) return RSX_FP_SAMPLER_MASK_INVALID;
++    u32 off = 0, mask = 0;
++    while (max_bytes - off >= 16u) {
++        const u32 w0 = rsx_fp_read_word(ucode + off);
++        const u32 w1 = rsx_fp_read_word(ucode + off + 4);
++        const u32 w2 = rsx_fp_read_word(ucode + off + 8);
++        const u32 w3 = rsx_fp_read_word(ucode + off + 12);
++        off += 16u;
++        const u32 opcode = (w0 & FP_OPCODE_MASK) >> FP_OPCODE_SHIFT;
++        if (w2 & FP_BRANCH) {
++            /* Known flow namespace: BRK, CAL, IFE, LOOP, REP, RET. These
++             * words carry branch metadata rather than CONST operands. */
++            switch (opcode) {
++            case 0x00: case 0x01: case 0x02: case 0x03: case 0x04: case 0x05:
++                break;
++            default:
++                return RSX_FP_SAMPLER_MASK_INVALID;
++            }
++        } else {
++            switch (opcode) {
++            case OP_TEX: case OP_TXP: case OP_TXD: case OP_TXB: case OP_TXL:
++                mask |= 1u << ((w0 & FP_TEX_UNIT_MASK) >> FP_TEX_UNIT_SHIFT);
++                break;
++            case OP_NOP: case OP_MOV: case OP_MUL: case OP_ADD: case OP_MAD:
++            case OP_DP3: case OP_DP4: case OP_DST: case OP_MIN: case OP_MAX:
++            case OP_SLT: case OP_SGE: case OP_SLE: case OP_SGT: case OP_SNE:
++            case OP_SEQ: case OP_FRC: case OP_FLR: case OP_KIL: case OP_PK4B:
++            case OP_UP4B: case OP_DDX: case OP_DDY: case OP_RCP: case OP_RSQ:
++            case OP_EX2: case OP_LG2: case OP_LIT: case OP_LRP: case OP_STR:
++            case OP_SFL: case OP_COS: case OP_SIN: case OP_PK2H: case OP_UP2H:
++            case OP_POW: case OP_PK4UB: case OP_UP4UB: case OP_PK2US: case OP_UP2US:
++            case OP_DP2A: case OP_RFL: case OP_DP2: case OP_NRM: case OP_DIV:
++            case OP_DIVSQ: case OP_LIF: case OP_FENCT: case OP_FENCB:
++                break;
++            default:
++                return RSX_FP_SAMPLER_MASK_INVALID;
++            }
++            if (fp_instruction_has_constant(w1, w2, w3)) {
++                if (max_bytes - off < 16u) return RSX_FP_SAMPLER_MASK_INVALID;
++                off += 16u;
++            }
++        }
++        if (w0 & FP_END) return mask;
++    }
++    return RSX_FP_SAMPLER_MASK_INVALID;
+ }
+ 
+ unsigned long long g_rsx_fp_nonfinite_constants = 0;

@@ -1,0 +1,90 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -508,6 +508,67 @@
+     return f;
+ }
+
++/* Optional port selector shared by ring observations; omitted means all. */
++static int audio_ring_selected(int port)
++{
++    static int selected = -2;
++    if (selected == -2) {
++        const char* value = getenv("AUDIO_RING_PORT");
++        selected = value && *value ? atoi(value) : -1;
++    }
++    return selected < 0 || selected == port;
++}
++
++#ifdef _WIN32
++/* AUDIO_PORT_STATS=1 samples PCM before clearing the consumed block.
++ * Other occupied slots do not prove a phase error; guest writes can race
++ * this observation. Empty slots can also be intentional silence. */
++static void audio_port_stats(int p, AudioPortSlot* port, u32 current)
++{
++    static int enabled = -1;
++    static struct { ULONGLONG start; u64 consumed, nonzero, other, empty; } stats[CELL_AUDIO_PORT_MAX];
++    if (enabled < 0) { const char* e = getenv("AUDIO_PORT_STATS"); enabled = e && *e && strcmp(e, "0") != 0; }
++    if (!enabled || !audio_ring_selected(p)) return;
++    const ULONGLONG now = GetTickCount64();
++    if (!stats[p].start) stats[p].start = now;
++    const int report = now - stats[p].start >= 5000;
++    const u32 samples = CELL_AUDIO_BLOCK_SAMPLES * (u32)port->param.nChannel;
++    const float* src = port->buffer + current * samples;
++    int current_data = 0;
++    for (u32 i = 0; i < samples; ++i) if (ld_be_f32(src + i) != 0.0f) { current_data = 1; break; }
++    char map[33]; int any_data = current_data; u32 blocks = (u32)port->param.nBlock;
++    if (blocks > 32) blocks = 32;
++    if (!current_data || report) {
++        for (u32 b = 0; b < blocks; ++b) {
++            int data_present = 0;
++            const float* block = port->buffer + b * samples;
++            for (u32 i = 0; i < samples; ++i) if (ld_be_f32(block + i) != 0.0f) { data_present = 1; break; }
++            map[b] = data_present ? '#' : '.';
++            any_data |= data_present;
++        }
++        map[blocks] = 0;
++    }
++    stats[p].consumed++;
++    if (current_data) stats[p].nonzero++;
++    else if (any_data) stats[p].other++;
++    else stats[p].empty++;
++    if (!report) return;
++    LARGE_INTEGER ticks, frequency; QueryPerformanceCounter(&ticks); QueryPerformanceFrequency(&frequency);
++    const u64 timestamp_us = (u64)(ticks.QuadPart / frequency.QuadPart) * 1000000ULL +
++        (u64)(ticks.QuadPart % frequency.QuadPart) * 1000000ULL / (u64)frequency.QuadPart;
++    fprintf(stderr, "[audio-port] t_us=%llu port=%d window_ms=%llu consumed=%llu nonzero=%llu zero=%llu "
++            "empty_current_with_other_data=%llu all_ring_empty=%llu ridx=%llu blk=%u "
++            "guest_ridx=%llu ring=[%s] (before-clear; occupancy!=producer-deadline)\n",
++            (unsigned long long)timestamp_us, p, (unsigned long long)(now - stats[p].start),
++            (unsigned long long)stats[p].consumed, (unsigned long long)stats[p].nonzero,
++            (unsigned long long)(stats[p].consumed - stats[p].nonzero),
++            (unsigned long long)stats[p].other, (unsigned long long)stats[p].empty,
++            (unsigned long long)port->read_index, current,
++            (unsigned long long)(port->read_idx_addr ? vm_read64((u32)port->read_idx_addr) : 0), map);
++    memset(&stats[p], 0, sizeof(stats[p])); stats[p].start = now;
++}
++#endif
++
+ /* Mix one block from all active ports into s_mix_buffer (stereo float) */
+ static void audio_mix_one_block(void)
+ {
+@@ -547,13 +608,16 @@
+         u32 block_idx = (u32)(port->read_index % nblock);
+         u32 block_offset = block_idx * CELL_AUDIO_BLOCK_SAMPLES * nch;
+         float* src = port->buffer + block_offset;
++#ifdef _WIN32
++        audio_port_stats(p, port, block_idx);
++#endif
+
+         /* AUDIO_PEAK diag: which blocks of this port's WHOLE ring hold data,
+          * vs which block the read cursor is on -- distinguishes "writer never
+          * writes" from "writer and reader cycle out of phase". */
+         { static int s_pk = -1; if (s_pk < 0) s_pk = getenv("AUDIO_PEAK") ? 1 : 0;
+-          if (s_pk) { static _Thread_local unsigned _c;
+-            if ((++_c % 400) == 0) {
++          if (s_pk && audio_ring_selected(p)) { static _Thread_local unsigned _c[CELL_AUDIO_PORT_MAX];
++            if ((++_c[p] % 400) == 0) {
+                 char map[36]; u32 b;
+                 for (b = 0; b < nblock && b < 32; b++) {
+                     const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;

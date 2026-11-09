@@ -1,0 +1,1896 @@
+{
+  "schema": 1,
+  "sdk_revision": "5244db92669b54831c6d3ebb7a96d58c4dbfa6df",
+  "order_source": "scripts/rebuild_ppu.py:PATCH_STACK",
+  "generated_by": "scripts/generate_patch_manifest.py",
+  "generated_at": "2026-10-20",
+  "patch_count": 91,
+  "disclaimer": "The repository does not record a historical objective for every patch. Fields marked 'not documented' are unknown, not guessed. Test associations are derived from patch names and fixture groups.",
+  "patches": [
+    {
+      "order": 1,
+      "name": "ppu-tail-return.patch",
+      "sha256": "91f41ebcd5a57999a8f5af020a730559567520e66fb6e1e00d8f84906744f2c8",
+      "series_file": "scripts/patches/ppu-tail-return.patch",
+      "subsystem": "PPU",
+      "files": [
+        "tools/ppu_lifter.py"
+      ],
+      "lines_added": 20,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_ppu_tail_jump_table.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 2,
+      "name": "fs-directory-entries.patch",
+      "sha256": "a2901b4a76b74d5f383ae417ebb9a7aa54b2706cd9771f8ccc507260a7797128",
+      "series_file": "scripts/patches/fs-directory-entries.patch",
+      "subsystem": "filesystem",
+      "files": [
+        "runtime/ppu/ppu_fs.cpp"
+      ],
+      "lines_added": 50,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "fs_entries_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 3,
+      "name": "spurs-event-routing.patch",
+      "sha256": "56aed9e3746aaceb0bbc38cf22c66d60b711f4504b7f49707bea781b81a7422c",
+      "series_file": "scripts/patches/spurs-event-routing.patch",
+      "subsystem": "SPU/SPURS",
+      "files": [
+        "libs/spurs/cellSpurs.c"
+      ],
+      "lines_added": 3,
+      "lines_removed": 97,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spurs_explicit_events*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 4,
+      "name": "spu-interpreter-handoff.patch",
+      "sha256": "dda0821fdf58aec1142dcae28775ed400a6c5976a98d0f4d7abcbb0fe4a002f4",
+      "series_file": "scripts/patches/spu-interpreter-handoff.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c"
+      ],
+      "lines_added": 13,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_handoff_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 5,
+      "name": "spu-microstep-absolute.patch",
+      "sha256": "52cb7bdc8c80ee9e95f12b53f29e2fa1034da20933003a27863903f2c85d8e44",
+      "series_file": "scripts/patches/spu-microstep-absolute.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_handoff_absolute_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 6,
+      "name": "d3d12-hidden-capture.patch",
+      "sha256": "40d044e7c219dc1005f7389d890f9bd2e6c86908469b24975a50d0f6f092c596",
+      "series_file": "scripts/patches/d3d12-hidden-capture.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 7,
+      "name": "d3d12-fp-export.patch",
+      "sha256": "2d4ba047a0798a8a07aed5e4f7ba86ba948ea7a642547c0b0a8a49770517d70a",
+      "series_file": "scripts/patches/d3d12-fp-export.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 4,
+      "lines_removed": 5,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 8,
+      "name": "spu-receive-event.patch",
+      "sha256": "eb141c28a2c2699b390cc509642034dd734826b74b4c103837c55b0cc4c67b71",
+      "series_file": "scripts/patches/spu-receive-event.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_interp.c",
+        "runtime/syscalls/lv2_register.c",
+        "runtime/syscalls/sys_event.c",
+        "runtime/syscalls/sys_event.h",
+        "tools/spu_lifter.py"
+      ],
+      "lines_added": 153,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_receive_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 9,
+      "name": "spu-thread-event-routing.patch",
+      "sha256": "5091adcd1456d1e40cb725db5223f7b0673dd1ea04e2565f2925a77dfa9a83d4",
+      "series_file": "scripts/patches/spu-thread-event-routing.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/syscalls/lv2_register.c"
+      ],
+      "lines_added": 13,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_thread_event_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 10,
+      "name": "spu-interpreter-mpyui.patch",
+      "sha256": "25d1801b05c97693a273005a3d3bdd34fbb083879e39a88afb39ebf864c9dbac",
+      "series_file": "scripts/patches/spu-interpreter-mpyui.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_multiply_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 11,
+      "name": "spu-zero-dma.patch",
+      "sha256": "f3b4d8f5a337681425c9aa8799d42bd5d5d21c0bd30ad5322be88c04b5fe7e4e",
+      "series_file": "scripts/patches/spu-zero-dma.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_dma.h"
+      ],
+      "lines_added": 10,
+      "lines_removed": 6,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_dma_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 12,
+      "name": "spu-interpreter-rothmi.patch",
+      "sha256": "b9d9c98f970f8b04d86ac448b0adce2611595ff9f1212e1ff6025c2ecba47765",
+      "series_file": "scripts/patches/spu-interpreter-rothmi.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_shift_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 13,
+      "name": "spu-orbi-decode.patch",
+      "sha256": "abf7c64e282a77c48b866da99b1c26a835f1b9701c41470ea0388651acaaf4db",
+      "series_file": "scripts/patches/spu-orbi-decode.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c",
+        "runtime/spu/spu_interp_tables.inc",
+        "tools/spu_disasm.py"
+      ],
+      "lines_added": 5,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_orbi_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 14,
+      "name": "spu-policy-data-abi.patch",
+      "sha256": "d6dba91806bb5903c17771fea5bf4e3084a3d3990ee4d8c63cd7b0f10efc5948",
+      "series_file": "scripts/patches/spu-policy-data-abi.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spurs_policy.c"
+      ],
+      "lines_added": 11,
+      "lines_removed": 16,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_policy_argument_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 15,
+      "name": "spu-interpreter-rotmah.patch",
+      "sha256": "d1c42e570473ba87ff73c35fb53a57b68946763d016f736895ab10631cc08671",
+      "series_file": "scripts/patches/spu-interpreter-rotmah.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_rotmah_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 16,
+      "name": "spu-xorbi-decode.patch",
+      "sha256": "a8309d45c638f4fcfd52b51e601fd2db199613e6dd63bb4edd62739732c9a9ec",
+      "series_file": "scripts/patches/spu-xorbi-decode.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c",
+        "runtime/spu/spu_interp_tables.inc",
+        "tools/spu_disasm.py"
+      ],
+      "lines_added": 5,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_xorbi_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 17,
+      "name": "audio-device-stats.patch",
+      "sha256": "7eaa6935db226a92c704a35220a50a3c0e955de1925a110fe3212755b9425076",
+      "series_file": "scripts/patches/audio-device-stats.patch",
+      "subsystem": "audio",
+      "files": [
+        "libs/audio/cellAudio.c"
+      ],
+      "lines_added": 105,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "audio_*",
+        "tests/test_audio_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 18,
+      "name": "audio-port-stats.patch",
+      "sha256": "fd467e5f4f44f107c3324f6963d22b04a081e408da7c261d8cc0bc05ca7c35b1",
+      "series_file": "scripts/patches/audio-port-stats.patch",
+      "subsystem": "audio",
+      "files": [
+        "libs/audio/cellAudio.c"
+      ],
+      "lines_added": 66,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "audio_*",
+        "tests/test_audio_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 19,
+      "name": "rsx-shader-bind-stats.patch",
+      "sha256": "030ce6c2cedb75477671af2baa76ed5d49111a116cbeb922d11c2941f3311c6b",
+      "series_file": "scripts/patches/rsx-shader-bind-stats.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/cellGcmSys.c"
+      ],
+      "lines_added": 123,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_fp_sampler_mask.py",
+        "tests/test_rsx_surface_dma.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 20,
+      "name": "rsx-immediate-vertices.patch",
+      "sha256": "1f7ea37bc2c770ebd9570aa8488df9699a1de4dd8f999ae5b12f999d0da77d56",
+      "series_file": "scripts/patches/rsx-immediate-vertices.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_commands.c",
+        "libs/video/rsx_commands.h",
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 97,
+      "lines_removed": 8,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "rsx_immediate_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 21,
+      "name": "texture-plane-capture.patch",
+      "sha256": "2dac85610886a4cf995136394dd14256a3a326e882f088ba6d05ca00d5fa0c4b",
+      "series_file": "scripts/patches/texture-plane-capture.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 36,
+      "lines_removed": 28,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_capture_trigger.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 22,
+      "name": "d3d12-guest-screen-texture.patch",
+      "sha256": "86dcefb2375eb8d0ed77b3617d526a61a1f8ad2568246c9a7c903292002f5d2a",
+      "series_file": "scripts/patches/d3d12-guest-screen-texture.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 5,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "rsx_mrt_display_*",
+        "tests/test_d3d12_display_bridge.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 23,
+      "name": "spu-hot-trace-gates.patch",
+      "sha256": "6bbaab0dfe79b416e83cb0661dfe569fb6a153eab15902cc70b18b245f1fcea0",
+      "series_file": "scripts/patches/spu-hot-trace-gates.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_context.h",
+        "runtime/spu/spu_dma.h",
+        "runtime/spu/spurs_policy.c"
+      ],
+      "lines_added": 39,
+      "lines_removed": 9,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_hot_trace_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 24,
+      "name": "d3d12-sixteen-texture-units.patch",
+      "sha256": "e82a504eb45cc817e64b307e306285481c6814436db527845900887f2036bb56",
+      "series_file": "scripts/patches/d3d12-sixteen-texture-units.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_guest_pipeline.h"
+      ],
+      "lines_added": 149,
+      "lines_removed": 96,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "rsx_guest_texture_*",
+        "tests/test_rsx_fp_sampler_mask.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 25,
+      "name": "spu-task-signal-wake.patch",
+      "sha256": "cd890b17b05dca7e8461b41d0fd8772abbac30e705fb21d800decad097da614e",
+      "series_file": "scripts/patches/spu-task-signal-wake.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_workload.c"
+      ],
+      "lines_added": 117,
+      "lines_removed": 7,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_task_wake_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 26,
+      "name": "ppu-vmx-exp-log-estimates.patch",
+      "sha256": "67baf824541a5584e40c71cb9b98671ff2c0c3c1365784a92e174f821f812f2a",
+      "series_file": "scripts/patches/ppu-vmx-exp-log-estimates.patch",
+      "subsystem": "PPU",
+      "files": [
+        "tools/ppu_lifter.py"
+      ],
+      "lines_added": 44,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_ppu_vmx_estimates.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 27,
+      "name": "gcm-flip-context-ownership.patch",
+      "sha256": "72e3328a577a3639038ef6abed4d438aa4b25c00a98aae0e6cf53382007fdce9",
+      "series_file": "scripts/patches/gcm-flip-context-ownership.patch",
+      "subsystem": "GCM",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "runtime/ppu/ppu_hle.cpp"
+      ],
+      "lines_added": 20,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "gcm_flip_wrap_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 28,
+      "name": "gcm-small-context-flip.patch",
+      "sha256": "da57d79e9e6aac71bdd04c25821a7fb2ce140b3cbfa16a4ada25958ad3caed10",
+      "series_file": "scripts/patches/gcm-small-context-flip.patch",
+      "subsystem": "GCM",
+      "files": [
+        "libs/video/cellGcmSys.c"
+      ],
+      "lines_added": 9,
+      "lines_removed": 5,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "gcm_flip_wrap_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 29,
+      "name": "gcm-self-jump-park.patch",
+      "sha256": "bb194947fd220bc0bc68187e45870d0640c28f5a8c63ff9e233c90296773615d",
+      "series_file": "scripts/patches/gcm-self-jump-park.patch",
+      "subsystem": "GCM",
+      "files": [
+        "libs/video/cellGcmSys.c"
+      ],
+      "lines_added": 13,
+      "lines_removed": 12,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "gcm_flip_wrap_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 30,
+      "name": "d3d12-mrt-display-composite.patch",
+      "sha256": "48c9688c2ae1e659b307bf443b56e8ec6fbbfba6cb8c528c0191d52780b59a96",
+      "series_file": "scripts/patches/d3d12-mrt-display-composite.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_backend.h"
+      ],
+      "lines_added": 42,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "rsx_mrt_display_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 31,
+      "name": "d3d12-frame-count-deferred-release.patch",
+      "sha256": "dd7212a2a67a66070af2f776be9d0461b056572787a69ad620cbbce65a748837",
+      "series_file": "scripts/patches/d3d12-frame-count-deferred-release.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 63,
+      "lines_removed": 19,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_present_gate.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 32,
+      "name": "audio-port-level-downmix-headroom.patch",
+      "sha256": "2080b866563bc1e9ac57f1a7cc603c194e89c2c44ce05c1021e600926647f3b2",
+      "series_file": "scripts/patches/audio-port-level-downmix-headroom.patch",
+      "subsystem": "audio",
+      "files": [
+        "libs/audio/cellAudio.c"
+      ],
+      "lines_added": 10,
+      "lines_removed": 5,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "audio_port_initial_level",
+        "tests/test_audio_downmix.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 33,
+      "name": "cellpad-script-buffer-expansion.patch",
+      "sha256": "97b74dd76f86b037de5aa5cbbe2b67418446f4ac2550b8650baa1f501680d8e5",
+      "series_file": "scripts/patches/cellpad-script-buffer-expansion.patch",
+      "subsystem": "input",
+      "files": [
+        "libs/input/cellPad.c"
+      ],
+      "lines_added": 5,
+      "lines_removed": 4,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_skip_and_auto_transition.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 34,
+      "name": "audio-amplitude-stats.patch",
+      "sha256": "efc56f5f3e9eb97bb5639fd66add64206ab7063991a3276372800e283425db3b",
+      "series_file": "scripts/patches/audio-amplitude-stats.patch",
+      "subsystem": "audio",
+      "files": [
+        "libs/audio/cellAudio.c\r"
+      ],
+      "lines_added": 105,
+      "lines_removed": 9,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "audio_amplitude_*",
+        "tests/test_audio_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 35,
+      "name": "audio-initial-level-contract.patch",
+      "sha256": "6b7e0a1727154b26e6f95b3b98b6e4cc16cf8f9997ab0b2c2c5f6bdae04b0cc4",
+      "series_file": "scripts/patches/audio-initial-level-contract.patch",
+      "subsystem": "audio",
+      "files": [
+        "libs/audio/cellAudio.c"
+      ],
+      "lines_added": 5,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "audio_port_initial_level",
+        "tests/test_audio_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 36,
+      "name": "d3d12-completed-flip-present.patch",
+      "sha256": "53b8ae31ead770d8ce4ee69084d14a99d55db4d4e04490192ad548204f3b745d",
+      "series_file": "scripts/patches/d3d12-completed-flip-present.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 15,
+      "lines_removed": 9,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_present_gate.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 37,
+      "name": "rsx-capture-after-file.patch",
+      "sha256": "49a16673757919b35ffc1cce57941680192d29ef9672d330392c7c16a85b8b30",
+      "series_file": "scripts/patches/rsx-capture-after-file.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 17,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_capture_trigger.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 38,
+      "name": "d3d12-offscreen-capacity.patch",
+      "sha256": "03f09bdc1813df8a5fed56e67a93e461d00849e1d5f6d96b22c6b9b6e7ff880e",
+      "series_file": "scripts/patches/d3d12-offscreen-capacity.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_guest_pipeline.h"
+      ],
+      "lines_added": 5,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_offscreen_capacity.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 39,
+      "name": "d3d12-small-render-targets.patch",
+      "sha256": "d08c2314563d36171ac164b26e2c933f914bb57c807400a4a5ceb8228f421692",
+      "series_file": "scripts/patches/d3d12-small-render-targets.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 8,
+      "lines_removed": 7,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_small_targets.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 40,
+      "name": "d3d12-stable-vertex-cache.patch",
+      "sha256": "60f042a6bf706d2336ae75172ad06372b404779df14987002e578794ed9f54da",
+      "series_file": "scripts/patches/d3d12-stable-vertex-cache.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 84,
+      "lines_removed": 21,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_vertex_cache.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 41,
+      "name": "d3d12-surface-metadata.patch",
+      "sha256": "2ab205b99a20de6a40497871579716ec98f5129c9e8de653899be0eaa4040026",
+      "series_file": "scripts/patches/d3d12-surface-metadata.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_surface_metadata.h"
+      ],
+      "lines_added": 88,
+      "lines_removed": 7,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_surface_metadata.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 42,
+      "name": "d3d12-color-clear-flags.patch",
+      "sha256": "80668886bba530699e65703f6dcbe3975fb76827ea88a6e8571d4733bef241d4",
+      "series_file": "scripts/patches/d3d12-color-clear-flags.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 4,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_clear_color_flags.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 43,
+      "name": "native-sdk-local-baseline.patch",
+      "sha256": "119b9128e6385e919c302b88ddf53b3ee246cf71ffbd44fba0a2137fb9a66af1",
+      "series_file": "scripts/patches/native-sdk-local-baseline.patch",
+      "subsystem": "SDK baseline",
+      "files": [
+        "libs/input/cellPad.c",
+        "libs/input/cellPad.h",
+        "libs/system/cellSaveData.c",
+        "libs/video/gpu_tlsf_allocator.h",
+        "libs/video/rsx_commands.c",
+        "libs/video/rsx_commands.h",
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_backend.h",
+        "libs/video/rsx_d3d12_guest_pipeline.h",
+        "libs/video/rsx_d3d12_linear_copy.h",
+        "libs/video/rsx_d3d12_linear_targets.h",
+        "libs/video/rsx_d3d12_shader_resources.h",
+        "libs/video/rsx_d3d12_surface_metadata.h",
+        "libs/video/rsx_d3d12_temporal_plan.h",
+        "libs/video/rsx_fp_decompiler.c",
+        "libs/video/rsx_fp_decompiler.h",
+        "libs/video/rsx_linear_catalog.h",
+        "libs/video/rsx_linear_coherence.h",
+        "libs/video/rsx_linear_metadata.h",
+        "libs/video/rsx_linear_view.h",
+        "runtime/ppu/ppu_fs.cpp",
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_coherency.c",
+        "runtime/spu/spu_context.h",
+        "runtime/spu/spu_dma.h",
+        "runtime/syscalls/sys_fs.c",
+        "runtime/syscalls/sys_timer.c",
+        "scratch/ppu_conformance_run.bat"
+      ],
+      "lines_added": 1880,
+      "lines_removed": 267,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 44,
+      "name": "d3d12-temporal-replay.patch",
+      "sha256": "44ebe2325437809a55c77c3b4dcc9262bd63f948724b6b4c859c5f076a58916f",
+      "series_file": "scripts/patches/d3d12-temporal-replay.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_linear_copy.h",
+        "libs/video/rsx_d3d12_temporal_replay.h"
+      ],
+      "lines_added": 348,
+      "lines_removed": 80,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_temporal_replay.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 45,
+      "name": "d3d12-guest-target-seed.patch",
+      "sha256": "4ab787d1000ee5a0da47a9da35ec5cb5a0359d386297d1287b2e85209962d014",
+      "series_file": "scripts/patches/d3d12-guest-target-seed.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_linear_targets.h"
+      ],
+      "lines_added": 88,
+      "lines_removed": 16,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_display_clear.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 46,
+      "name": "d3d12-exact-view-feedback.patch",
+      "sha256": "661b26022ab66f2a2896a02e8a8003ae0e3158223b299f9cad0cd388741da11e",
+      "series_file": "scripts/patches/d3d12-exact-view-feedback.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_feedback.h",
+        "libs/video/rsx_d3d12_temporal_plan.h",
+        "libs/video/rsx_d3d12_temporal_replay.h"
+      ],
+      "lines_added": 272,
+      "lines_removed": 5,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_feedback.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 47,
+      "name": "d3d12-display-surface-coherence.patch",
+      "sha256": "ba649ccf1ee65b0b3746cfea48086bba09c53dbbc4d05c2c15a943bced501fe5",
+      "series_file": "scripts/patches/d3d12-display-surface-coherence.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_backend.h",
+        "libs/video/rsx_d3d12_display_bridge.h",
+        "libs/video/rsx_d3d12_temporal_plan.h",
+        "libs/video/rsx_d3d12_temporal_replay.h",
+        "libs/video/rsx_linear_metadata.h"
+      ],
+      "lines_added": 309,
+      "lines_removed": 31,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_display_coherence.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 48,
+      "name": "d3d12-no-color-targets.patch",
+      "sha256": "bfdbe9d3d3fd3e8f7a83b6c38ac071a6a63f17cb9845508936bf4073a6c4f94c",
+      "series_file": "scripts/patches/d3d12-no-color-targets.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_backend.h",
+        "libs/video/rsx_d3d12_temporal_plan.h",
+        "libs/video/rsx_linear_metadata.h"
+      ],
+      "lines_added": 48,
+      "lines_removed": 18,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_no_color_target.py",
+        "rsx_d3d12_no_color_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 49,
+      "name": "d3d12-fragment-constant-snapshots.patch",
+      "sha256": "fdc1d6bf5c894b4f3fe2c21d8540fb515829c5a20f0c6216967427e9b4e84f4c",
+      "series_file": "scripts/patches/d3d12-fragment-constant-snapshots.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_fragment_constants.h",
+        "libs/video/rsx_d3d12_guest_pipeline.h"
+      ],
+      "lines_added": 80,
+      "lines_removed": 14,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_fragment_constants.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 50,
+      "name": "d3d12-depth-clear-handling.patch",
+      "sha256": "d780c56d2ab59a64411a4ba50764aa617571cfec22ce475c598c0437a6ba64b5",
+      "series_file": "scripts/patches/d3d12-depth-clear-handling.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c",
+        "libs/video/rsx_d3d12_temporal_plan.h"
+      ],
+      "lines_added": 42,
+      "lines_removed": 21,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_depth_clear.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 51,
+      "name": "rsx-fp-color-input-clamp.patch",
+      "sha256": "12fa7b3a5a55f9717f8cebc217b4ec1531fd0952f89f765cb05458446209dffb",
+      "series_file": "scripts/patches/rsx-fp-color-input-clamp.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_fp_decompiler.c"
+      ],
+      "lines_added": 5,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_fp_pack_unpack.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 52,
+      "name": "rsx-fp-pack-unpack.patch",
+      "sha256": "6d85c28aa9bf17fc2f14606b8ec4185b177279de7a0266e1bee380ca2dd8ec42",
+      "series_file": "scripts/patches/rsx-fp-pack-unpack.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_fp_decompiler.c"
+      ],
+      "lines_added": 39,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_fp_pack_unpack.py",
+        "fp_pack_opcodes"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 53,
+      "name": "rsx-fp-predicated-write.patch",
+      "sha256": "ba676996a50d08239b0af58a9621eced638521f293a8ecdf6bed4e39ae733db7",
+      "series_file": "scripts/patches/rsx-fp-predicated-write.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_fp_decompiler.c"
+      ],
+      "lines_added": 8,
+      "lines_removed": 4,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_fp_predicated_write.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 54,
+      "name": "rsx-fp-bx2-texture.patch",
+      "sha256": "adbaf5795d77aa26bd071ad552110cdc822faa4583d74acb7517414147f688b6",
+      "series_file": "scripts/patches/rsx-fp-bx2-texture.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_fp_decompiler.c"
+      ],
+      "lines_added": 19,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_fp_bx2_texture.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 55,
+      "name": "spu-overlay-lookup.patch",
+      "sha256": "ef48b7621b76d5dbd5c6b9731a66ab362ac7aded12bd32da6903ca80aaf55256",
+      "series_file": "scripts/patches/spu-overlay-lookup.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c"
+      ],
+      "lines_added": 23,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_overlay_lookup_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 56,
+      "name": "rsx-vertex-cmp-fetch.patch",
+      "sha256": "68e4702f0ad3e8700b9546963fd78484f2c761b833a0a1943b0eebb9a077f1d6",
+      "series_file": "scripts/patches/rsx-vertex-cmp-fetch.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_vertex_fetch.c"
+      ],
+      "lines_added": 17,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "rsx_vertex_cmp_fetch"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 57,
+      "name": "rsx-nv3089-transfer-probe.patch",
+      "sha256": "182cd0c17d1e6528a76e5aebeee85c9cef94248823b5553fc24b9aeac8d23177",
+      "series_file": "scripts/patches/rsx-nv3089-transfer-probe.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "libs/video/cellGcmSys.h",
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 176,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "nv3089_probe_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 58,
+      "name": "spu-owned-span-no-fallback.patch",
+      "sha256": "63a1b33ef3581c0c55193bd44fb20e0a42797d5ef3651da83866c10ef3776ecb",
+      "series_file": "scripts/patches/spu-owned-span-no-fallback.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c"
+      ],
+      "lines_added": 3,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_overlay_lookup_owner-unlifted"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 59,
+      "name": "rsx-nv3089-source-origin-12-4.patch",
+      "sha256": "691b0eea4997cda4cc61c6479344fade7e9bb949f4f64391a6762397db7af499",
+      "series_file": "scripts/patches/rsx-nv3089-source-origin-12-4.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/cellGcmSys.c"
+      ],
+      "lines_added": 10,
+      "lines_removed": 4,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "nv3089_probe_origin"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 60,
+      "name": "rsx-nv3089-first-row-target.patch",
+      "sha256": "f0bc0e5e2b2525fc92cb66992f739fe1643608739f5501856bf2f0cd16033a83",
+      "series_file": "scripts/patches/rsx-nv3089-first-row-target.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "libs/video/cellGcmSys.h",
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 122,
+      "lines_removed": 7,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "nv3089_probe_target",
+        "nv3089_probe_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 61,
+      "name": "spu-context-owned-mfc.patch",
+      "sha256": "48258da0bc1ea5f32903aaec3cad4a989d3d0cff7a4c108206f851371877d1ac",
+      "series_file": "scripts/patches/spu-context-owned-mfc.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_context.h",
+        "runtime/spu/spu_dma.h",
+        "runtime/spu/spu_lifted_thread.c",
+        "runtime/spu/spu_mfc_state.h",
+        "runtime/spu/tests/test_spu_mfc_slots.c"
+      ],
+      "lines_added": 104,
+      "lines_removed": 229,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "spu_mfc_isolation_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 62,
+      "name": "d3d12-nv3089-guest-writeback.patch",
+      "sha256": "f5cf062166d4cff7f62bfdc1241e4daad6b95f1698111b0b0a6158e6eb46bda1",
+      "series_file": "scripts/patches/d3d12-nv3089-guest-writeback.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "libs/video/cellGcmSys.h",
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 154,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "nv3089_probe_writeback",
+        "nv3089_probe_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 63,
+      "name": "rsx-capture-rearm.patch",
+      "sha256": "e1303a10d9982aaf12fe9f36291cc21a4960478d9f5c7e0d6cca86bfc2791d7e",
+      "series_file": "scripts/patches/rsx-capture-rearm.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 24,
+      "lines_removed": 2,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 64,
+      "name": "ppu-syscall-snapshot.patch",
+      "sha256": "a60dd127415a39d0e7b1f6d065e1ab621dd7889fb7b36605874799e2bfcaafaa",
+      "series_file": "scripts/patches/ppu-syscall-snapshot.patch",
+      "subsystem": "PPU",
+      "files": [
+        "runtime/ppu/ppu_loader.cpp"
+      ],
+      "lines_added": 62,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 65,
+      "name": "ppu-hle-snapshot.patch",
+      "sha256": "3ca6a26e6066ad380799c49136085473665ef0a9545966ef081df6e95dd844a0",
+      "series_file": "scripts/patches/ppu-hle-snapshot.patch",
+      "subsystem": "PPU",
+      "files": [],
+      "lines_added": 62,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 66,
+      "name": "ppu-sampler-direct-only.patch",
+      "sha256": "34b942f3ea76025b4413ca8d670f74fec7b682b21b08fb746a63f1f782051874",
+      "series_file": "scripts/patches/ppu-sampler-direct-only.patch",
+      "subsystem": "PPU",
+      "files": [],
+      "lines_added": 4,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 67,
+      "name": "ppu-wws-wait-observer.patch",
+      "sha256": "18c7da71f7fda52655244b445c81e6c1ce956fea0aff7b7c319e2b7fd9e93b20",
+      "series_file": "scripts/patches/ppu-wws-wait-observer.patch",
+      "subsystem": "PPU",
+      "files": [],
+      "lines_added": 36,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 68,
+      "name": "ppu-sampler-rip-buckets.patch",
+      "sha256": "56ee6be8d9344576f6ac789f8d125a922cb95ddd753ecd21d4e4c99fd4947384",
+      "series_file": "scripts/patches/ppu-sampler-rip-buckets.patch",
+      "subsystem": "PPU",
+      "files": [],
+      "lines_added": 46,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 69,
+      "name": "ppu-light-callsite-observer.patch",
+      "sha256": "cbf1fd9108200b4153fa6cb5e6f6e7ed36477118113b6e4216116e61cb936ad1",
+      "series_file": "scripts/patches/ppu-light-callsite-observer.patch",
+      "subsystem": "PPU",
+      "files": [
+        "runtime/ppu/ppu_loader.cpp",
+        "tools/ppu_lifter.py"
+      ],
+      "lines_added": 79,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 70,
+      "name": "ppu-light-loop-observer.patch",
+      "sha256": "e9c62739d596c57498525140aa48d09aea003c28cc033d81dd036c48d7344aea",
+      "series_file": "scripts/patches/ppu-light-loop-observer.patch",
+      "subsystem": "PPU",
+      "files": [
+        "runtime/ppu/ppu_loader.cpp",
+        "tools/ppu_lifter.py"
+      ],
+      "lines_added": 65,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 71,
+      "name": "ppu-light-wait-observer.patch",
+      "sha256": "780f4f5c486a32dc7a24713f8e8533b243f4c3d3514b33c1a58c9f55d31bd6e2",
+      "series_file": "scripts/patches/ppu-light-wait-observer.patch",
+      "subsystem": "PPU",
+      "files": [
+        "runtime/ppu/ppu_loader.cpp",
+        "tools/ppu_lifter.py"
+      ],
+      "lines_added": 71,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 72,
+      "name": "spurs-pm-quantum-observer.patch",
+      "sha256": "346709789bcd483aaacee0e3b186b5a8990aab7ee3a58bde2c74c8b55b91660b",
+      "series_file": "scripts/patches/spurs-pm-quantum-observer.patch",
+      "subsystem": "SPU/SPURS",
+      "files": [
+        "runtime/spu/pm_quantum_observer.h",
+        "runtime/spu/spurs_policy.c"
+      ],
+      "lines_added": 85,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 73,
+      "name": "spu-interp-ied-trace.patch",
+      "sha256": "23405a289b165829cd03aace1ea12db3fdd3a0af2814115bddf45003e567fdd8",
+      "series_file": "scripts/patches/spu-interp-ied-trace.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_interp.c"
+      ],
+      "lines_added": 51,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 74,
+      "name": "spu-smc-frequency.patch",
+      "sha256": "ed12dc8d7385f0cdf9f56ce701ff1ec64b737ce0ff60000a51aff0d2e0af1719",
+      "series_file": "scripts/patches/spu-smc-frequency.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c"
+      ],
+      "lines_added": 36,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/native/smc_frequency/test_frequency.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 75,
+      "name": "antigravity-keyboard.patch",
+      "sha256": "e0e06e52dc834b0c209023c3f21f511eb484f9ec910d0b44a716be43c8f4d6cb",
+      "series_file": "scripts/patches/antigravity-keyboard.patch",
+      "subsystem": "unclassified",
+      "files": [
+        "libs/input/cellPad.c"
+      ],
+      "lines_added": 78,
+      "lines_removed": 9,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 76,
+      "name": "antigravity-pso-cache.patch",
+      "sha256": "a543fabc12f8654f86d6299372b87be2ef8b99b91d8521bf3597c5e7b3be6adb",
+      "series_file": "scripts/patches/antigravity-pso-cache.patch",
+      "subsystem": "unclassified",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 106,
+      "lines_removed": 27,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 77,
+      "name": "rsx-capture-presented-only.patch",
+      "sha256": "25d79d98bbbe679baa0ea939c0ff7f9e25a1b033ad05b0809bbe75aa8ea72cb4",
+      "series_file": "scripts/patches/rsx-capture-presented-only.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 2,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_capture_trigger.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 78,
+      "name": "rsx-vs-compile-trace.patch",
+      "sha256": "7b1dd808ec775fe8d0bcd5775906dfed9812fc7e1f8014e3ff316632356ab339",
+      "series_file": "scripts/patches/rsx-vs-compile-trace.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 8,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_vertex_cache.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 79,
+      "name": "rsx-vs-working-set.patch",
+      "sha256": "21d0a04c0e9603d46ad9545340a91da1a491c4e77d993eb11c45c68b98b64701",
+      "series_file": "scripts/patches/rsx-vs-working-set.patch",
+      "subsystem": "RSX",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c"
+      ],
+      "lines_added": 1,
+      "lines_removed": 1,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_vertex_cache.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 80,
+      "name": "ppu-sampler-clear-windows.patch",
+      "sha256": "a92163276bbd39817bbf652d361a6fe009dc767655b17decf1ebfafa41bc6828",
+      "series_file": "scripts/patches/ppu-sampler-clear-windows.patch",
+      "subsystem": "PPU",
+      "files": [
+        "runtime/ppu/ppu_loader.cpp"
+      ],
+      "lines_added": 2,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_sampler_report_windows.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 81,
+      "name": "frame-timeline.patch",
+      "sha256": "7a64efce402d34c01efad9dcc928863e34049576395b3896852a5f62ed5f03e7",
+      "series_file": "scripts/patches/frame-timeline.patch",
+      "subsystem": "unclassified",
+      "files": [
+        "include/ps3emu/ps3_ftrace.h",
+        "libs/video/cellGcmSys.c",
+        "libs/video/rsx_d3d12_backend.c",
+        "runtime/ppu/ppu_loader.cpp",
+        "runtime/spu/spu_channels.c",
+        "runtime/syscalls/sys_ppu_thread.c",
+        "tools/ftrace_report.py"
+      ],
+      "lines_added": 547,
+      "lines_removed": 7,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_ftrace_contract.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 82,
+      "name": "ftrace-alternating-sleeps.patch",
+      "sha256": "6549b376f85bb43b17145158a4d3841ee09015792bd2015e68e55ea7a48e15d9",
+      "series_file": "scripts/patches/ftrace-alternating-sleeps.patch",
+      "subsystem": "unclassified",
+      "files": [
+        "include/ps3emu/ps3_ftrace.h"
+      ],
+      "lines_added": 28,
+      "lines_removed": 14,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_ftrace_contract.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 83,
+      "name": "spurs-attribute-abi.patch",
+      "sha256": "ce3a39057635f2faaa812aa340d6f6b1e88f6a1f40077967a68f1e05c411296e",
+      "series_file": "scripts/patches/spurs-attribute-abi.patch",
+      "subsystem": "SPU/SPURS",
+      "files": [
+        "libs/spurs/cellSpurs.c"
+      ],
+      "lines_added": 8,
+      "lines_removed": 6,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/native/spurs_abi/probe.cpp"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 84,
+      "name": "d3d12-fragment-capture-state.patch",
+      "sha256": "586d302b307a573681f0acf10c1fd93c9dcb29cffa1326765f6fb90fec1db095",
+      "series_file": "scripts/patches/d3d12-fragment-capture-state.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c\r"
+      ],
+      "lines_added": 82,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_fp_capture.py",
+        "tests/test_d3d12_fallback_state.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 85,
+      "name": "d3d12-fragment-program-snapshots.patch",
+      "sha256": "afdcd2d978109a3c35b37ae9089db65a6835b555969a919bc4a7eadb226c8f5b",
+      "series_file": "scripts/patches/d3d12-fragment-program-snapshots.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c\r"
+      ],
+      "lines_added": 68,
+      "lines_removed": 32,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_d3d12_fragment_constants.py",
+        "tests/test_d3d12_fp_capture.py",
+        "tests/test_d3d12_fallback_state.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 86,
+      "name": "d3d12-present-selection-capture.patch",
+      "sha256": "45e28d118eec71c93e142960a42e9c9592f84e275b4037c68089a533273c22ab",
+      "series_file": "scripts/patches/d3d12-present-selection-capture.patch",
+      "subsystem": "RSX/D3D12",
+      "files": [
+        "libs/video/rsx_d3d12_backend.c\r"
+      ],
+      "lines_added": 38,
+      "lines_removed": 3,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_rsx_capture_trigger.py",
+        "tests/test_d3d12_display_bridge.py",
+        "tests/test_d3d12_temporal_replay.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 87,
+      "name": "gcm-fifo-profile.patch",
+      "sha256": "17c171f87599ed9babccb930d035c931f032e9ee5cf9f30bcaf75720ce887b44",
+      "series_file": "scripts/patches/gcm-fifo-profile.patch",
+      "subsystem": "GCM",
+      "files": [
+        "libs/video/cellGcmSys.c",
+        "libs/video/gcm_fifo_profile.h"
+      ],
+      "lines_added": 197,
+      "lines_removed": 4,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_gcm_fifo_profile.py",
+        "tests/test_native_sprint_safety.py",
+        "tests/test_ftrace_contract.py"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 88,
+      "name": "spu-dispatch-owner-contract.patch",
+      "sha256": "68c03c67299d0f50275cc36a889973e0c2d70fac634a6d07e00a538ad2a0fb08",
+      "series_file": "scripts/patches/spu-dispatch-owner-contract.patch",
+      "subsystem": "SPU",
+      "files": [
+        "runtime/spu/spu_channels.c",
+        "runtime/spu/spu_dispatch_mt.c"
+      ],
+      "lines_added": 9,
+      "lines_removed": 9,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/test_spu_dispatch_ownership.py",
+        "spu_overlay_lookup_*"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 89,
+      "name": "spurs-workload-stack-argument.patch",
+      "sha256": "67e8b34a3eb16c6c214ba2ee2e63fda4f5eef9864f16d0a010d66a23ced718fb",
+      "series_file": "scripts/patches/spurs-workload-stack-argument.patch",
+      "subsystem": "SPU/SPURS",
+      "files": [
+        "libs/spurs/cellSpurs.c",
+        "runtime/ppu/ppu_hle.cpp"
+      ],
+      "lines_added": 22,
+      "lines_removed": 8,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [
+        "tests/native/spurs_abi/probe.cpp"
+      ],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 90,
+      "name": "spurs-multilane-sequential-dispatch.patch",
+      "sha256": "3367bed9dbf211b945471539b0b5d514fde47d55a46d55a2182337938f52ada9",
+      "series_file": "scripts/patches/spurs-multilane-sequential-dispatch.patch",
+      "subsystem": "SPU/SPURS",
+      "files": [
+        "libs/spurs/cellSpurs.c"
+      ],
+      "lines_added": 9,
+      "lines_removed": 0,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    },
+    {
+      "order": 91,
+      "name": "cellpad-stick-injection.patch",
+      "sha256": "a4c7fcc41709c2c86593f9815edb6e9212fbcd3d0444476ed177eaa8b30e9587",
+      "series_file": "scripts/patches/cellpad-stick-injection.patch",
+      "subsystem": "input",
+      "files": [
+        "libs/input/cellPad.c",
+        "libs/input/cellPad.h"
+      ],
+      "lines_added": 72,
+      "lines_removed": 19,
+      "objective": "not documented in the repository; inferred scope only",
+      "original_problem": "not documented in the repository",
+      "dependencies": "apply in the order listed in scripts/rebuild_ppu.py",
+      "associated_tests": [],
+      "upstream_candidate": "unknown",
+      "verification": "sha256 and order only; runtime effect is covered only where a test is listed"
+    }
+  ]
+}

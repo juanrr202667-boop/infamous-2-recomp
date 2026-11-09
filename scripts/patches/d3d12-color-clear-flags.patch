@@ -1,0 +1,13 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4626,6 +4626,10 @@
+                     for (int _m = 0; _m < 3; _m++) cur_m[_m] = wantm[_m];
+                 }
+                 if (dr->is_clear) {
++                    /* CLEAR_SURFACE bits 0/1 select depth/stencil only.
++                     * They must not erase any color attachment. Per-channel
++                     * color masks and guest depth/stencil remain separate work. */
++                    if (!(dr->surface_meta.clear_flags & 0xF0u)) continue;
+                     D3D12_CPU_DESCRIPTOR_HANDLE rh =
+                         (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
+                     /* RT_CLEARDBG=1: clear offscreen targets to magenta rather

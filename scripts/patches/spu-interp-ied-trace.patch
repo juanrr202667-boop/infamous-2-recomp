@@ -1,0 +1,81 @@
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -9,6 +9,11 @@
+ #include "spu_helpers.h"
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <errno.h>
++#include <stdatomic.h>
++#ifdef _WIN32
++#include <windows.h>
++#endif
+ 
+ /* Channel ABI (runtime/spu/spu_channels.c); the lifter emits these same protos
+  * into each generated spu_recomp.h — declared here to stay header-independent. */
+@@ -106,6 +111,37 @@
+ #define I   (d.imm)
+ #define PREF(r) ((r)._u32[0])
+ 
++/* Optional, bounded E/D diagnostic. Never modifies the guest context. */
++static void i2_trace_interpreted_ied(const spu_context* ctx, uint32_t pc,
++                                     spu_op op, uint32_t bits, int taken,
++                                     int before, int after) {
++    static _Atomic unsigned emitted = 0;
++    const int saved_errno = errno;
++#ifdef _WIN32
++    const DWORD saved_error = GetLastError();
++#endif
++    const char* enabled = getenv("I2_INTERP_IRQ_TRACE");
++    if (enabled && enabled[0] == '1' && enabled[1] == 0) {
++        const char* filter = getenv("I2_INTERP_IRQ_IMAGE");
++        char* end = NULL;
++        long image = filter && *filter ? strtol(filter, &end, 0) : 0;
++        int match = !filter || !*filter || (end && *end == 0 && image == ctx->image_id);
++        const char* value = getenv("I2_INTERP_IRQ_TRACE_MAX");
++        unsigned long limit = value && *value ? strtoul(value, &end, 10) : 128;
++        if (value && *value && (!end || *end || !limit || limit > 4096)) limit = 0;
++        if (match && limit && atomic_fetch_add_explicit(&emitted, 1, memory_order_relaxed) < limit) {
++            fprintf(stderr, "[i2-spu-ied] image=%d spu=%u policy=%d pc=%05X op=%s bits=%05X taken=%d before=%d after=%d\n",
++                    ctx->image_id, ctx->spu_id, ctx->policy_mode, pc,
++                    spu_op_name[op], bits, taken, before, after);
++            fflush(stderr);
++        }
++    }
++    errno = saved_errno;
++#ifdef _WIN32
++    SetLastError(saved_error);
++#endif
++}
++
+ static int spu_step(spu_context* ctx) {
+     uint32_t pc = ctx->pc, m = pc & SPU_LS_MASK;
+     const uint8_t* p = ctx->ls;
+@@ -113,6 +149,18 @@
+                   | ((uint32_t)p[m+2] << 8) | p[m+3];
+     spu_ins d; spu_decode1(insn, pc, &d);
+     uint32_t next = pc + 4;
++    int ied_taken = -1;
++    int ied_before = ctx->int_enable;
++    if (insn & 0xC0000u) {
++        switch (d.op) {
++        case SPU_bi: case SPU_bisl: case SPU_iret: ied_taken = 1; break;
++        case SPU_biz:   ied_taken = PREF(DST) == 0; break;
++        case SPU_binz:  ied_taken = PREF(DST) != 0; break;
++        case SPU_bihz:  ied_taken = (PREF(DST) & 0xffffu) == 0; break;
++        case SPU_bihnz: ied_taken = (PREF(DST) & 0xffffu) != 0; break;
++        default: break;
++        }
++    }
+ 
+     switch (d.op) {
+     /* immediates / loads */
+@@ -314,6 +362,9 @@
+                 d.op < SPU_OP_COUNT ? spu_op_name[d.op] : "?", insn, pc);
+         ctx->pc = pc; ctx->status = SPU_STATUS_STOPPED_BY_HALT; return 1;
+     }
++    if (ied_taken >= 0)
++        i2_trace_interpreted_ied(ctx, pc, d.op, insn & 0xC0000u,
++                                 ied_taken, ied_before, ctx->int_enable);
+     ctx->pc = next;
+     return 0;
+ }

@@ -1,0 +1,37 @@
+diff --git a/runtime/spu/spurs_policy.c b/runtime/spu/spurs_policy.c
+--- a/runtime/spu/spurs_policy.c
++++ b/runtime/spu/spurs_policy.c
+@@ -149,22 +149,17 @@
+     ctx->gpr[0]._u32[0] = SPURS_PM_EXIT_TO_KERNEL_LS;  /* return-to-kernel link */
+     ctx->gpr[1]._u32[0] = 0x3FFB0;                     /* stack (PM reloads its own) */
+     ctx->gpr[3]._u32[0] = 0x100;                       /* context */
+-    /* r4 layout is LO-WORD-IN-PREFERRED, not a big-endian u64: verified
+-     * against the authentic wwsjob PM bytes (entry 0x2BF0 `stqa r4,0x14E0`,
+-     * attach 0x2720 `brz r4`/`wrch MFC_EAL, r4` -- it treats r4's PREFERRED
+-     * WORD as the 32-bit queue EA, and `shlqbyi r4,4`'s next word as the aux
+-     * half). Passing {hi,lo} put 0 in the preferred slot, so the queue attach
+-     * early-returned on every run: tickets got claimed via the shifted copy
+-     * but the job-list header never DMA'd in, and the PM wedged forever in
+-     * its staged-job wait (LBP's post-intro loading freeze). */
+-    /* ...and the CLAIM path reads the EA from the shlqbyi(r4,4) copy (LS
+-     * 0x13F0, via func_3038 -> 2418), i.e. r4's SECOND word. Both word 0
+-     * (attach) and word 1 (claim) must carry the 32-bit EA; the hi half
+-     * rides in words 2-3. */
+-    ctx->gpr[4]._u32[0] = (uint32_t)wkl_data;          /* attach reads word0  */
+-    ctx->gpr[4]._u32[1] = (uint32_t)wkl_data;          /* claim reads word1   */
+-    ctx->gpr[4]._u32[2] = (uint32_t)(wkl_data >> 32);
+-    ctx->gpr[4]._u32[3] = (uint32_t)(wkl_data >> 32);
++    /* SPU ABI v1.7 sections 2.1.1-2.1.3 and 2.2.3: scalar u64 data
++     * occupies the preferred doubleword in big-endian order (high, low).
++     * The WWS PM reads word 0 for its audit-buffer EA and word 1 for its
++     * queue EA. These addresses must remain distinct. Bytes 8-15 are
++     * undefined by the ABI; clear them for deterministic entry padding.
++     * https://ilab.usc.edu/packages/cell-processor/docs/SPU_ABI-Specification_1.7.pdf
++     */
++    ctx->gpr[4]._u32[0] = (uint32_t)(wkl_data >> 32);
++    ctx->gpr[4]._u32[1] = (uint32_t)wkl_data;
++    ctx->gpr[4]._u32[2] = 0;
++    ctx->gpr[4]._u32[3] = 0;
+     ctx->gpr[5]._u32[0] = 0;                           /* poll status */
+
+     g_spurs_pm_polls  = 0;

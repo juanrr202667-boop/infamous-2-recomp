@@ -1,0 +1,41 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2420,9 +2420,15 @@
+     const u32 begin = vm_read32(ctx), io_begin = gcm_ea2io(begin);
+     if (end - (cur + 4) < GCM_FLIP_WRAP_BYTES && io_begin != 0xFFFFFFFFu &&
+         s_fifo_getoff >= io_begin + GCM_RECYCLE_MARGIN) {
+-        vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
+-        vm_write32(ctx + 8, begin);
+-        return 1;
++        /* The runtime's callback owns its ring. A title callback owns its
++         * context and may place a fence after the flip; rewinding here would
++         * overwrite that tail before the title can publish it. */
++        const u32 callback = vm_read32(ctx + 0xC);
++        if (callback && vm_read32(callback) == GCM_FIFO_CALLBACK_SENTINEL_EA) {
++            vm_write32(cur + 4, 0x20000000u | io_begin);   /* JUMP -> begin */
++            vm_write32(ctx + 8, begin);
++            return 1;
++        }
+     }
+     vm_write32(ctx + 8, cur + 4);
+     return 1;
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -98,6 +98,17 @@
+  * HLE stub. prx_resolve_export returns 0 when no PRX exports the NID, so this is
+  * a no-op when no PRX is loaded. */
+ extern "C" uint32_t prx_resolve_export(uint32_t nid);
++/* Optional observers may forward a generic handler only when it is the
++ * active dispatch path. Context overrides and loaded PRX exports take priority.
++ * Query/register during boot, before guest threads enter this registry. */
++extern "C" void* ps3_hle_find_handler(uint32_t nid)
++{
++    if (prx_resolve_export(nid)) return nullptr;
++    for (uint32_t i = 0; i < g_ctx_count; ++i)
++        if (g_ctx[i].nid == nid) return nullptr;
++    ps3_nid_entry* entry = g_hle_inited ? ps3_nid_table_find(&g_hle_nids, nid) : nullptr;
++    return entry ? entry->handler : nullptr;
++}
+ extern "C" void     ps3_indirect_call(ppu_context* ctx);
+ extern "C" uint32_t vm_read32(uint64_t a);
+ extern "C" void     vm_write32(uint64_t a, uint32_t v);

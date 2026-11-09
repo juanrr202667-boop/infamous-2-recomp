@@ -1,0 +1,50 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5409,6 +5409,8 @@
+       if (cap) {
+         static int s_cap_parsed = 0, s_cap_armed = 0;
+         static u32 s_cap_start = 0, s_cap_count = 1, s_cap_stride = 1, s_cap_done = 0;
++        static u32 s_cap_total = 0;
++        static int s_cap_wait_removed = 0;
+         if (!s_cap_parsed) {
+             s_cap_parsed = 1;
+             u32 a = 0, b = 1, c = 1;
+@@ -5420,6 +5422,22 @@
+         /* RSX_CAP_AFTER_FILE defers all rsxcap readback until a local file
+          * exists. Latch once and anchor the existing count/stride at this
+          * frame, even when the configured absolute start already passed. */
++        const char* rearm = getenv("RSX_CAP_REARM");
++        const char* trigger = getenv("RSX_CAP_AFTER_FILE");
++        int rearm_enabled = rearm && !strcmp(rearm, "1") && trigger && *trigger;
++        if (rearm_enabled && s_cap_armed && s_cap_done >= s_cap_count) {
++            DWORD attrs = GetFileAttributesA(trigger);
++            if (attrs == INVALID_FILE_ATTRIBUTES && !s_cap_wait_removed) {
++                s_cap_wait_removed = 1;
++                printf("[RSXCAP] rearm-ready\n");
++                fflush(stdout);
++            }
++            else if (s_cap_wait_removed && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
++                s_cap_start = s_d3d.frame_count;
++                s_cap_done = 0;
++                s_cap_wait_removed = 0;
++            }
++        }
+         if (!s_cap_armed) {
+             const char* after_file = getenv("RSX_CAP_AFTER_FILE");
+             if (!after_file || !*after_file) s_cap_armed = 1;
+@@ -5434,9 +5452,13 @@
+         }
+         if (s_cap_armed && s_cap_done < s_cap_count) {
+             u32 target = s_cap_start + s_cap_done * s_cap_stride;
+-            if (s_d3d.frame_count >= target && s_dbg_last_draws > 0) {
+-                rsx_capture_frame(fi, s_dbg_last_draws, s_cap_done);
++            const char* allow_empty = getenv("RSX_CAP_ALLOW_EMPTY");
++            if (s_d3d.frame_count >= target &&
++                (s_dbg_last_draws > 0 || (allow_empty && !strcmp(allow_empty, "1")))) {
++                rsx_capture_frame(fi, s_dbg_last_draws, rearm_enabled ? s_cap_total : s_cap_done);
++                fflush(stdout);
+                 s_cap_done++;
++                s_cap_total++;
+             }
+         }
+       } }

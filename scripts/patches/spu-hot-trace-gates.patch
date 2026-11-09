@@ -1,0 +1,109 @@
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -53,6 +53,10 @@
+ static inline void spu_ls_watch_hit(uint32_t lsa, int is_write, const uint8_t* p) {
+     spu_ls_watch_hit2(lsa, is_write, p, 0, 0);
+ }
++
++/* Cached opt-in diagnostics; accessors publish settings atomically. */
++int spu_dma_list_trace_enabled(void); /* SPU_DMA_LIST_TRACE */
++int spu_pm_trace_enabled(void);       /* SPURS_PM_TRACE */
+ 
+ /* Maximum number of MFC tag groups */
+ #define SPU_MFC_MAX_TAGS    32
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -815,7 +815,8 @@
+      * about to land. If the handler was supposed to fill in the claimed job's
+      * EA and did not, the elements read back empty and the transfer is a no-op
+      * -- which looks identical to "the pipeline never ran" from the PPU side. */
+-    { uint32_t _e = spu->list_stall_elem_lsa[t] & SPU_LS_MASK;
++    if (spu_dma_list_trace_enabled()) {
++      uint32_t _e = spu->list_stall_elem_lsa[t] & SPU_LS_MASK;
+       fprintf(stderr, "[mfc-list] RESUME-ELEMS dest=0x%05X elems\n0x%05X:",
+               spu->list_stall_dest_lsa[t], _e);
+       for (uint32_t _o = 0; _o < 16 && (_e + _o) + 3 < SPU_LS_SIZE; _o += 4)
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -30,6 +30,31 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++
++/* 0 = uninitialized, 1 = disabled, 2 = enabled. Concurrent first callers
++ * may read the same process environment; only one complete result publishes.
++ * Trace settings are immutable for the lifetime of this process. */
++static int spu_trace_setting(volatile LONG* cache, const char* name)
++{
++    LONG setting = InterlockedCompareExchange(cache, 0, 0);
++    if (!setting) {
++        const char* value = getenv(name);
++        LONG wanted = value && *value && strcmp(value, "0") != 0 ? 2 : 1;
++        setting = InterlockedCompareExchange(cache, wanted, 0);
++        if (!setting) setting = wanted;
++    }
++    return setting == 2;
++}
++int spu_dma_list_trace_enabled(void)
++{
++    static volatile LONG cache = 0;
++    return spu_trace_setting(&cache, "SPU_DMA_LIST_TRACE");
++}
++int spu_pm_trace_enabled(void)
++{
++    static volatile LONG cache = 0;
++    return spu_trace_setting(&cache, "SPURS_PM_TRACE");
++}
+ 
+ /* The SPU decrementer ticks at the PS3 timebase, 79.8 MHz -- the same clock
+  * sys_time_get_timebase_frequency reports to the PPU. Titles calibrate real
+@@ -2111,8 +2136,9 @@
+             /* Module exit: the workload returned to the kernel (drained/yield).
+              * Print gated: fires once per policy run = thousands/sec. */
+             g_spurs_pm_exited = 1;
+-            { static int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_PM_TRACE") ? 1 : 0;
+-              if (s_t) { static unsigned long _n = 0; unsigned long n = ++_n;
++            { if (spu_pm_trace_enabled()) {
++                static volatile LONG _n = 0;
++                unsigned long n = (unsigned long)InterlockedIncrement(&_n);
+                 if (n <= 64 || (n & 0xFFF) == 0)
+                     fprintf(stderr, "[spurs-pm] exit-to-kernel#%lu (r3=0x%08X polls=%u)\n",
+                             n, ctx->gpr[3]._u32[0], g_spurs_pm_polls); } }
+@@ -2124,7 +2150,7 @@
+             /* cellSpursModulePoll: report "no contention — keep running".
+              * (One virtual SPU per workload here, so nothing ever preempts.) */
+             unsigned n = ++g_spurs_pm_polls;
+-            if (n <= 4 || (n % 4096) == 0)
++            if (spu_pm_trace_enabled() && (n <= 4 || (n % 4096) == 0))
+                 fprintf(stderr, "[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
+                         n, ctx->gpr[3]._u32[0]);
+             ctx->gpr[3] = spu_make_preferred_u32(0);
+diff --git a/runtime/spu/spurs_policy.c b/runtime/spu/spurs_policy.c
+--- a/runtime/spu/spurs_policy.c
++++ b/runtime/spu/spurs_policy.c
+@@ -24,6 +24,7 @@
+  */
+ #include "spu_context.h"
+ #include "spu_workload.h"
++#include "../platform/win32_compat.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -169,11 +170,9 @@
+      * unconditional fprintf+fflush pairs a real fraction of movie playback.
+      * Default off; SPURS_PM_TRACE=1 restores them (first 64 + every 4096th
+      * so an enabled trace can't flood either). */
+-    static int s_trace = -1;
+-    if (s_trace < 0) s_trace = getenv("SPURS_PM_TRACE") ? 1 : 0;
+-    static unsigned long s_runs = 0;
+-    unsigned long runno = ++s_runs;
+-    int log_this = s_trace && (runno <= 64 || (runno & 0xFFF) == 0);
++    static volatile LONG s_runs = 0;
++    unsigned long runno = (unsigned long)InterlockedIncrement(&s_runs);
++    int log_this = spu_pm_trace_enabled() && (runno <= 64 || (runno & 0xFFF) == 0);
+     if (log_this) {
+         fprintf(stderr, "[spurs-pm] RUN#%lu wid=%u data=0x%llX spurs=0x%08X image=%d entry=0xA00 size=%u\n",
+                 runno, wid, (unsigned long long)wkl_data, spurs_ea, image_id, pm_size);

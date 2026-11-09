@@ -1,0 +1,108 @@
+diff --git a/runtime/spu/spurs_policy.c b/runtime/spu/spurs_policy.c
+--- a/runtime/spu/spurs_policy.c
++++ b/runtime/spu/spurs_policy.c
+@@ -24,6 +24,7 @@
+  */
+ #include "spu_context.h"
+ #include "spu_workload.h"
++#include "pm_quantum_observer.h"
+ #include "../platform/win32_compat.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -259,7 +260,9 @@
+     unsigned batch_before = g_wws_batch_gets;
+     unsigned claim_before = g_spu_putllc_sync_hit;
+ 
++    i2_pm_quantum_trace(wid, spu_num, wkl_data, 0, 0, 0);
+     const int pm_halted = spu_run_with_halt(entry, ctx);
++    i2_pm_quantum_trace(wid, spu_num, wkl_data, 1, pm_halted, (uint32_t)ctx->pc & SPU_LS_MASK);
+     /* A lane's run should only end through exitToKernel. Anything else strands
+      * the jobs it had claimed (GH3's once-per-~10-songs freeze): say how. */
+     if (((uint32_t)ctx->pc & SPU_LS_MASK) != SPURS_PM_EXIT_TO_KERNEL_LS) {
+diff --git a/runtime/spu/pm_quantum_observer.h b/runtime/spu/pm_quantum_observer.h
+new file mode 100644
+--- /dev/null
++++ b/runtime/spu/pm_quantum_observer.h
+@@ -0,0 +1,82 @@
++#ifndef I2_PM_QUANTUM_OBSERVER_H
++#define I2_PM_QUANTUM_OBSERVER_H
++
++/* Optional observation of policy-module quanta, not job completion. Values
++ * are independent atomic snapshots. The observer reads no guest memory. */
++#ifdef _WIN32
++#include <windows.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++typedef struct I2PmQuantumObserver {
++    uint64_t entered[6], returned[6];
++    uint32_t halt[6], pc[6];
++    uint32_t arg, delay, interval, maximum;
++    int enabled;
++} I2PmQuantumObserver;
++static I2PmQuantumObserver i2_pm_state;
++static INIT_ONCE i2_pm_once = INIT_ONCE_STATIC_INIT;
++static DWORD WINAPI i2_pm_report(LPVOID data) {
++    I2PmQuantumObserver* s = (I2PmQuantumObserver*)data;
++    Sleep(s->delay);
++    for (unsigned n = 0; n < s->maximum; ++n) {
++        for (unsigned i = 0; i < 6; ++i) {
++            uint64_t in = __atomic_load_n(&s->entered[i], __ATOMIC_RELAXED);
++            if (!in) continue;
++            fprintf(stderr, "[i2-pm0] spu=%u arg=%08X entered=%llu returned=%llu last_halt=%d last_pc=%08X concurrent=1\n",
++                    i, s->arg, (unsigned long long)in,
++                    (unsigned long long)__atomic_load_n(&s->returned[i], __ATOMIC_RELAXED),
++                    (int)__atomic_load_n(&s->halt[i], __ATOMIC_RELAXED),
++                    __atomic_load_n(&s->pc[i], __ATOMIC_RELAXED));
++        }
++        fflush(stderr); Sleep(s->interval);
++    }
++    return 0;
++}
++static BOOL CALLBACK i2_pm_init(PINIT_ONCE once, PVOID parameter, PVOID* context) {
++    (void)once; (void)parameter; (void)context;
++    const char* v = getenv("I2_PM0_AFTER_MS"); char* end = NULL;
++    if (!v || !*v) return TRUE;
++    unsigned long delay = strtoul(v, &end, 10);
++    if (*end || !delay || delay > 3600000) return TRUE;
++    unsigned long interval = 1000, maximum = 60;
++    v = getenv("I2_PM0_INTERVAL_MS");
++    if (v && *v) { interval = strtoul(v, &end, 10); if (*end || !interval || interval > 60000) return TRUE; }
++    v = getenv("I2_PM0_MAX");
++    if (v && *v) { maximum = strtoul(v, &end, 10); if (*end || !maximum || maximum > 10000) return TRUE; }
++    v = getenv("I2_PM0_ARG");
++    if (!v || !*v) return TRUE;
++    unsigned long arg = strtoul(v, &end, 0);
++    if (*end || !arg) return TRUE;
++    i2_pm_state.arg = (uint32_t)arg; i2_pm_state.delay = (uint32_t)delay;
++    i2_pm_state.interval = (uint32_t)interval; i2_pm_state.maximum = (uint32_t)maximum;
++    HANDLE h = CreateThread(NULL, 0, i2_pm_report, &i2_pm_state, 0, NULL);
++    if (h) { i2_pm_state.enabled = 1; CloseHandle(h); }
++    return TRUE;
++}
++static void i2_pm_quantum_trace(uint32_t wid, uint32_t spu, uint64_t arg,
++                                unsigned phase, int halt, uint32_t pc) {
++    DWORD saved = GetLastError();
++    if (wid == 0 && spu < 6) {
++        InitOnceExecuteOnce(&i2_pm_once, i2_pm_init, NULL, NULL);
++        I2PmQuantumObserver* s = &i2_pm_state;
++        if (s->enabled && arg == s->arg) {
++            if (!phase) __atomic_fetch_add(&s->entered[spu], 1, __ATOMIC_RELAXED);
++            else {
++                __atomic_store_n(&s->halt[spu], (uint32_t)halt, __ATOMIC_RELAXED);
++                __atomic_store_n(&s->pc[spu], pc, __ATOMIC_RELAXED);
++                __atomic_fetch_add(&s->returned[spu], 1, __ATOMIC_RELAXED);
++            }
++        }
++    }
++    SetLastError(saved);
++}
++#else
++#include <stdint.h>
++static void i2_pm_quantum_trace(uint32_t wid, uint32_t spu, uint64_t arg,
++                                unsigned phase, int halt, uint32_t pc) {
++    (void)wid; (void)spu; (void)arg; (void)phase; (void)halt; (void)pc;
++}
++#endif
++#endif

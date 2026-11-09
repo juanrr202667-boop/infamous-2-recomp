@@ -1,0 +1,49 @@
+diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
+--- a/runtime/spu/spu_interp.c
++++ b/runtime/spu/spu_interp.c
+@@ -159,6 +159,7 @@
+     case SPU_andbi:DST = spu_andbi(A,I); break;
+     case SPU_andhi:DST = spu_andhi(A,I); break;
+     case SPU_orhi: DST = spu_orhi(A,I); break;
++    case SPU_orbi: DST = spu_orbi(A,I); break;
+     case SPU_orx:  DST = spu_orx(A); break;
+     /* compares */
+     case SPU_ceq: DST = spu_ceq(A,B); break;
+diff --git a/runtime/spu/spu_interp_tables.inc b/runtime/spu/spu_interp_tables.inc
+--- a/runtime/spu/spu_interp_tables.inc
++++ b/runtime/spu/spu_interp_tables.inc
+@@ -142,6 +142,7 @@
+     SPU_nop,
+     SPU_nor,
+     SPU_or,
++    SPU_orbi,
+     SPU_orc,
+     SPU_orhi,
+     SPU_ori,
+@@ -343,6 +344,7 @@
+     [SPU_nop] = "nop",
+     [SPU_nor] = "nor",
+     [SPU_or] = "or",
++    [SPU_orbi] = "orbi",
+     [SPU_orc] = "orc",
+     [SPU_orhi] = "orhi",
+     [SPU_ori] = "ori",
+@@ -451,6 +453,7 @@
+     switch (op8) {
+     case 0x4: return SPU_ori;
+     case 0x5: return SPU_orhi;
++    case 0x6: return SPU_orbi;
+     case 0xC: return SPU_sfi;
+     case 0xD: return SPU_sfhi;
+     case 0x14: return SPU_andi;
+diff --git a/tools/spu_disasm.py b/tools/spu_disasm.py
+--- a/tools/spu_disasm.py
++++ b/tools/spu_disasm.py
+@@ -144,6 +144,7 @@
+     0b00010100: "andi",   # and word immediate
+     0b00000100: "ori",    # or word immediate
+     0b00000101: "orhi",   # or halfword immediate            (op8 0x05)
++    0b00000110: "orbi",   # or byte immediate                (op8 0x06)
+     0b00010101: "andhi",  # and halfword immediate           (op8 0x15)
+     0b00010110: "andbi",  # and byte immediate               (op8 0x16)
+     0b01000100: "xori",   # xor word immediate

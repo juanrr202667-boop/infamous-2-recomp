@@ -1,0 +1,29 @@
+--- a/libs/video/rsx_d3d12_guest_pipeline.h
++++ b/libs/video/rsx_d3d12_guest_pipeline.h
+@@ -8,11 +8,12 @@
+ 
+ /* Keep cache SRVs, RT SRVs and per-draw tables in disjoint heap windows. */
+ #define RSX_D3D12_GUEST_TEXTURE_UNITS RSX_MAX_TEXTURES
+-#define RSX_D3D12_DRAW_SRV_BASE 128
+ #define RSX_D3D12_VP_TEX_SLOTS 96
+ #define RSX_D3D12_VP_TEX_SRV_BASE 1
+-#define RSX_D3D12_MAX_OFF_RTS 16
++#define RSX_D3D12_MAX_OFF_RTS 32
+ #define RSX_D3D12_RT_SRV_BASE (RSX_D3D12_VP_TEX_SRV_BASE + RSX_D3D12_VP_TEX_SLOTS)
++/* Leave every RT descriptor below the first per-draw texture table. */
++#define RSX_D3D12_DRAW_SRV_BASE ((RSX_D3D12_RT_SRV_BASE + RSX_D3D12_MAX_OFF_RTS + 31) & ~31)
+ 
+ /* The legacy FP buffer keeps one scale per texture, then alpha and constants.
+  * The current unbuffered decompiler does not consume this buffer. */
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1033,7 +1033,8 @@
+ 
+         /* SRV descriptor heap (shader-visible). Layout: slot 0 = legacy atlas
+          * (dbgfont / textured 2D path), slots 1-96 = VP texture cache,
+-         * 97-112 = offscreen render targets, draw tables start at 128.
++         * offscreen targets follow that cache; draw tables start at the
++         * aligned RSX_D3D12_DRAW_SRV_BASE after every reserved RT descriptor.
+          * All slots start as null SRVs so every 16-wide guest draw table
+          * is fully initialized, including on tier-1 hardware. */
+         {

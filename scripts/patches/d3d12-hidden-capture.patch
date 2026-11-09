@@ -1,0 +1,13 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 68929ed..e7eee6d 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -529,7 +529,7 @@ static HWND create_window(u32 width, u32 height, const char* title)
+     return CreateWindowExA(
+         0, "ps3recomp_d3d12",
+         title ? title : "ps3recomp (D3D12)",
+-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
++        WS_OVERLAPPEDWINDOW | (getenv("D3D12_HIDDEN") ? 0 : WS_VISIBLE),
+         CW_USEDEFAULT, CW_USEDEFAULT,
+         wr.right - wr.left, wr.bottom - wr.top,
+         NULL, NULL, GetModuleHandle(NULL), NULL);

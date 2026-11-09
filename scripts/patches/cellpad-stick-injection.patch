@@ -1,0 +1,132 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -85,12 +85,30 @@
+ /* Atomic state for programmatic input injection */
+ static volatile u16 s_prog_inject_mask[PAD_MAX_HOST_PORTS] = {0};
+ static volatile int s_prog_inject_polls[PAD_MAX_HOST_PORTS] = {0};
++static volatile u8  s_prog_inject_lx[PAD_MAX_HOST_PORTS] = {128};
++static volatile u8  s_prog_inject_ly[PAD_MAX_HOST_PORTS] = {128};
++static volatile u8  s_prog_inject_rx[PAD_MAX_HOST_PORTS] = {128};
++static volatile u8  s_prog_inject_ry[PAD_MAX_HOST_PORTS] = {128};
++static volatile int s_prog_inject_stick_polls[PAD_MAX_HOST_PORTS] = {0};
+ 
+ void cellPad_inject_pulse(u32 port_no, u16 button_mask, int duration_polls)
+ {
+     if (port_no < PAD_MAX_HOST_PORTS) {
+         s_prog_inject_mask[port_no] = button_mask;
+         s_prog_inject_polls[port_no] = duration_polls > 0 ? duration_polls : 30;
++        s_data_fresh[port_no] = 1;
++    }
++}
++
++void cellPad_inject_stick(u32 port_no, u8 lx, u8 ly, u8 rx, u8 ry, int duration_polls)
++{
++    if (port_no < PAD_MAX_HOST_PORTS) {
++        s_prog_inject_lx[port_no] = lx;
++        s_prog_inject_ly[port_no] = ly;
++        s_prog_inject_rx[port_no] = rx;
++        s_prog_inject_ry[port_no] = ry;
++        s_prog_inject_stick_polls[port_no] = duration_polls > 0 ? duration_polls : 30;
++        s_data_fresh[port_no] = 1;
+     }
+ }
+ 
+@@ -683,6 +701,16 @@
+         data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(mask & 0xFF);
+         data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((mask >> 8) & 0xFF);
+         s_prog_inject_polls[port_no]--;
++        s_data_fresh[port_no] = 1;
++    }
++    if (port_no < PAD_MAX_HOST_PORTS && s_prog_inject_stick_polls[port_no] > 0) {
++        hs->analog_lx = s_prog_inject_lx[port_no];
++        hs->analog_ly = s_prog_inject_ly[port_no];
++        hs->analog_rx = s_prog_inject_rx[port_no];
++        hs->analog_ry = s_prog_inject_ry[port_no];
++        hs->connected = 1;
++        s_prog_inject_stick_polls[port_no]--;
++        s_data_fresh[port_no] = 1;
+     }
+ 
+     /* PAD_AUTOPRESS: headless bring-up input -- pulse CROSS then START every few
+@@ -787,26 +815,48 @@
+       } }
+ 
+     /* Analog sticks */
+-    /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
+-     * fixed positions. Rubber Ducky drives its camera from the sticks and never
+-     * moves on its own, so with no host pad the view is frozen wherever it
+-     * started -- which can leave the subject of the demo off-screen or too far
+-     * away to make out. Legit input simulation, same footing as YDKJ_INJECT_PAD. */
+-    { static int s_st = -1;
+-      static unsigned char s_v[4] = {128,128,128,128};
+-      /* Optional 5th/6th fields: the seconds the hold starts and ends, so the menus
+-       * before gameplay are not driven by it (PAD_STICK="128,0,128,128,300,320"). */
+-      static double s_from = 0, s_until = 1e30; static unsigned long long s_t0 = 0;
++    /* PAD_STICK="lx,ly,rx,ry[,from,until][;...]" (0-255, 128 = centred): hold analog sticks at
++     * fixed positions. Supports multiple timed holds separated by ';'. */
++    {
++#define STICK_MAX 32
++      static int s_st = -1;
++      static unsigned char s_v[STICK_MAX][4];
++      static double s_from[STICK_MAX], s_until[STICK_MAX];
++      static int s_n = 0;
++      static unsigned long long s_t0 = 0;
+       if (!s_t0) s_t0 = GetTickCount64();
+-      if (s_st < 0) { const char* e = getenv("PAD_STICK");
+-        s_st = e ? 1 : 0;
+-        if (e) { int a=128,b=128,c=128,d=128;
+-                 sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
+-                 s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
+-                 s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
+-      if (s_st && (double)(GetTickCount64() - s_t0) / 1000.0 >= s_from && (double)(GetTickCount64() - s_t0) / 1000.0 < s_until) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
+-                  hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
+-                  hs->connected = 1; }
++      if (s_st < 0) {
++        const char* e = getenv("PAD_STICK");
++        s_st = (e && *e) ? 1 : 0;
++        if (s_st) {
++          for (const char* q = e; q && *q && s_n < STICK_MAX; ) {
++            int a=128,b=128,c=128,d=128; double f = 0, u = 1e30;
++            if (sscanf(q, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&f,&u) < 4) break;
++            s_v[s_n][0]=(unsigned char)a; s_v[s_n][1]=(unsigned char)b;
++            s_v[s_n][2]=(unsigned char)c; s_v[s_n][3]=(unsigned char)d;
++            s_from[s_n] = f; s_until[s_n] = u; s_n++;
++            q = strchr(q, ';'); if (q) q++;
++          }
++          if (s_n) fprintf(stderr, "[cellPad] PAD_STICK: %d hold(s)\n", s_n);
++        }
++      }
++      if (s_st) {
++        const double now = (double)(GetTickCount64() - s_t0) / 1000.0;
++        for (int i = 0; i < s_n; i++) {
++          if (now >= s_from[i] && now < s_until[i]) {
++            static int s_last_i = -1;
++            if (i != s_last_i) {
++              s_last_i = i;
++              fprintf(stderr, "[cellPad] PAD_STICK hold %d ACTIVE: lx=%u ly=%u rx=%u ry=%u (from=%.1fs until=%.1fs)\n",
++                      i, s_v[i][0], s_v[i][1], s_v[i][2], s_v[i][3], s_from[i], s_until[i]);
++            }
++            hs->analog_lx = s_v[i][0]; hs->analog_ly = s_v[i][1];
++            hs->analog_rx = s_v[i][2]; hs->analog_ry = s_v[i][3];
++            hs->connected = 1;
++            break;
++          }
++        }
++      }
+       /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
+        * deflections instead of holding one. Guessing a single stick position and
+        * re-running costs ~5 minutes a try; a sweep answers "can input move the
+diff --git a/libs/input/cellPad.h b/libs/input/cellPad.h
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -203,6 +203,9 @@
+ /* Programmatically inject a button mask on the specified port for N polls */
+ void cellPad_inject_pulse(u32 port_no, u16 button_mask, int duration_polls);
+ 
++/* Programmatically inject analog stick coordinates on the specified port for N polls */
++void cellPad_inject_stick(u32 port_no, u8 lx, u8 ly, u8 rx, u8 ry, int duration_polls);
++
+ #ifdef __cplusplus
+ }
+ #endif

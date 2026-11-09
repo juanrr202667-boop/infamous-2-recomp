@@ -1,0 +1,706 @@
+--- /dev/null
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -0,0 +1,246 @@
++/*
++ * ps3_ftrace -- a timeline of who waits for whom, frame by frame.
++ *
++ * PS3_FTRACE=<start s>:<seconds>:<path> records timestamped spans from the PPU
++ * syscall dispatcher, the SPU channel waits, the RSX FIFO walker and the Metal
++ * backend for <seconds> starting <start s> after the first hook ran (~boot),
++ * then writes them to <path> as text for tools/ftrace_report.py:
++ *   # ps3_ftrace start_us=<n> end_us=<n> spans=<n> dropped=<n>
++ *   T <tid> <name>                         PPU thread names
++ *   <kind> <who> <a hex> <b hex> <t0 us> <t1 us>
++ *
++ * A sampling profile says where CPU time goes; it cannot say why a frame takes
++ * 130 ms when no thread is busy for 130 ms. That is a latency chain -- the PPU
++ * waiting on SPU tasks waiting on the RSX waiting on the GPU -- and only a
++ * timeline shows it.
++ *
++ * Header-only on purpose: the hooked files are also compiled on their own by
++ * self-contained tests, and a new link dependency would break each of them.
++ * The state is one weak/selectany object the linker folds into a single copy;
++ * the functions are static inline. Off (the default), every hook is a load
++ * and a predictable branch. Knobs: PS3_FTRACE_MIN_US (shortest span kept,
++ * default 20), PS3_FTRACE_MERGE_US (usleep polls of one thread at one call
++ * site closer than this become one span, default 300), PS3_FTRACE_CAP (spans
++ * kept, default 4M = 128 MB, allocated only when recording).
++ */
++#ifndef PS3EMU_PS3_FTRACE_H
++#define PS3EMU_PS3_FTRACE_H
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#ifdef _WIN32
++#  include <windows.h>
++#else
++#  include <time.h>
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum ps3_ft_kind {
++    PS3_FT_SYSCALL     = 1,  /* who = PPU tid, a = syscall number, b = guest lr        */
++    PS3_FT_USLEEP      = 2,  /* who = PPU tid, a = usleep calls merged, b = guest lr   */
++    PS3_FT_SPU_WAIT    = 3,  /* who = SPU id,  a = channel,      b = LS pc             */
++    PS3_FT_SPU_BUSY    = 4,  /* who = SPU id,  a = lifted image, b = SPURS wid (LS 0x1DC) */
++    PS3_FT_SEMA        = 5,  /* RSX blocked on ACQUIRE: a = label offset, b = value    */
++    PS3_FT_SEMA_GAVEUP = 6,  /* same, ended by a bounded acquire giving up            */
++    PS3_FT_DRAIN       = 7,  /* one RSX FIFO drain pass, a = 1 if it ended on an ACQUIRE */
++    PS3_FT_FLIP_FIFO   = 8,  /* instant: the RSX reached a flip, a = buffer            */
++    PS3_FT_FLIP_REQ    = 9,  /* instant: the guest asked for a flip, a = buffer        */
++    PS3_FT_PRESENT     = 10, /* the host presented a guest frame                       */
++    PS3_FT_GPU_ENCODE  = 11, /* Metal: CPU encode of the recorded draws, a = 1 present / 0 flush, b = records */
++    PS3_FT_GPU_WAIT    = 12, /* Metal: CPU waits for the GPU, a = 1 present / 0 flush / 2 in-flight bound, b = flush reason */
++    PS3_FT_READBACK    = 13, /* Metal: render target read back to the CPU, a = w, b = h */
++    PS3_FT_GPU_EXEC    = 14, /* Metal: a command buffer's own GPU time, ending when the CPU saw it
++                              * complete; who = render passes, a = depth resolves | colour copies << 16,
++                              * b = 1 present / 0 flush */
++};
++
++#if defined(_MSC_VER)
++#  define PS3_FT_SHARED __declspec(selectany)
++#else
++#  define PS3_FT_SHARED __attribute__((weak))
++#endif
++
++typedef struct { uint64_t t0, t1; uint32_t a, b, who, kind; } ps3_ft_rec;
++
++enum { PS3_FT_TIDS = 256 };
++
++typedef struct {
++    int on;              /* 0 unknown, 1 initialising, 2 recording, 3 off/done */
++    int dumped;
++    uint32_t writers;
++    uint32_t n, cap, dropped;
++    uint64_t base, start, end, min, merge;
++    ps3_ft_rec* buf;
++    char path[1024];
++    struct { uint64_t t0, t1; uint32_t lr, n; } us[PS3_FT_TIDS];   /* usleep run being merged */
++    char names[PS3_FT_TIDS][28];
++} ps3_ft_state;
++
++PS3_FT_SHARED ps3_ft_state g_ps3_ft = { 0 };
++
++static inline uint64_t ps3_ft_now(void)
++{
++#ifdef _WIN32
++    LARGE_INTEGER c, f;
++    QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f);
++    return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++#endif
++}
++
++static inline void ps3_ft_dump(void)
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    if (__atomic_exchange_n(&s->dumped, 1, __ATOMIC_ACQ_REL)) return;
++    __atomic_store_n(&s->on, 3, __ATOMIC_SEQ_CST);
++    while (__atomic_load_n(&s->writers, __ATOMIC_SEQ_CST)) { }
++    /* Close the open usleep runs; their threads may still be in them. */
++    for (uint32_t t = 0; t < PS3_FT_TIDS; t++) {
++        if (!s->us[t].n) continue;
++        const uint32_t i = __atomic_fetch_add(&s->n, 1, __ATOMIC_RELAXED);
++        if (i >= s->cap) break;
++        ps3_ft_rec r = { s->us[t].t0, s->us[t].t1, s->us[t].n, s->us[t].lr, t, PS3_FT_USLEEP };
++        s->buf[i] = r;
++    }
++    uint32_t n = __atomic_load_n(&s->n, __ATOMIC_ACQUIRE);
++    if (n > s->cap) n = s->cap;
++    FILE* f = fopen(s->path, "w");
++    if (!f) { fprintf(stderr, "[ftrace] cannot write %s\n", s->path); return; }
++    fprintf(f, "# ps3_ftrace start_us=%.3f end_us=%.3f spans=%u dropped=%u\n",
++            (double)(s->start - s->base) / 1e3, (double)(s->end - s->base) / 1e3, n, s->dropped);
++    for (uint32_t t = 0; t < PS3_FT_TIDS; t++)
++        if (s->names[t][0]) fprintf(f, "T %u %s\n", t, s->names[t]);
++    for (uint32_t i = 0; i < n; i++) {
++        const ps3_ft_rec* r = &s->buf[i];
++        if (!r->kind) continue;   /* claimed but never filled: a writer raced the dump */
++        fprintf(f, "%u %u %x %x %.3f %.3f\n", r->kind, r->who, r->a, r->b,
++                (double)(r->t0 - s->base) / 1e3, (double)(r->t1 - s->base) / 1e3);
++    }
++    fclose(f);
++    fprintf(stderr, "[ftrace] wrote %u spans (%u dropped) to %s\n", n, s->dropped, s->path);
++}
++
++static inline void ps3_ft_dump_atexit(void) { ps3_ft_dump(); }
++
++/* First hook: read PS3_FTRACE once. Hooks see "off" while another thread is
++ * still setting up, which only loses spans before the window anyway. */
++static inline int ps3_ft_init(void)
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    int expect = 0;
++    if (!__atomic_compare_exchange_n(&s->on, &expect, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        return expect == 2;
++    int on = 3;
++    const char* e = getenv("PS3_FTRACE");
++    double start = 0, secs = 0;
++    int used = 0;
++    if (e && *e) {
++        if (sscanf(e, "%lf:%lf:%n", &start, &secs, &used) < 2 || !used || secs <= 0) {
++            fprintf(stderr, "[ftrace] PS3_FTRACE=<start s>:<seconds>:<path>, got '%s'\n", e);
++        } else {
++            snprintf(s->path, sizeof s->path, "%s", e + used);
++            const char* m = getenv("PS3_FTRACE_MIN_US");
++            s->min = (m ? strtoull(m, 0, 10) : 20ull) * 1000ull;
++            const char* g = getenv("PS3_FTRACE_MERGE_US");
++            s->merge = (g ? strtoull(g, 0, 10) : 300ull) * 1000ull;
++            const char* c = getenv("PS3_FTRACE_CAP");
++            s->cap = c ? (uint32_t)strtoul(c, 0, 10) : 4u << 20;
++            s->buf = (ps3_ft_rec*)calloc(s->cap, sizeof(ps3_ft_rec));
++            if (!s->buf) {
++                fprintf(stderr, "[ftrace] no memory for %u spans\n", s->cap);
++            } else {
++                s->base = ps3_ft_now();
++                s->start = s->base + (uint64_t)(start * 1e9);
++                s->end = s->start + (uint64_t)(secs * 1e9);
++                atexit(ps3_ft_dump_atexit);
++                fprintf(stderr, "[ftrace] recording %.1f s from t=%.1f s into %s\n", secs, start, s->path);
++                on = 2;
++            }
++        }
++    }
++    __atomic_store_n(&s->on, on, __ATOMIC_RELEASE);
++    return on == 2;
++}
++
++/* The hook guard: one load when off. */
++static inline int ps3_ft_on(void)
++{
++    const int on = __atomic_load_n(&g_ps3_ft.on, __ATOMIC_RELAXED);
++    if (__builtin_expect(on == 2, 0)) return 1;
++    if (__builtin_expect(on != 0, 1)) return 0;
++    return ps3_ft_init();
++}
++#define PS3_FT_ON() ps3_ft_on()
++
++static inline uint64_t ps3_ft_min_ns(void) { return g_ps3_ft.min; }
++
++static inline int ps3_ft_enter(ps3_ft_state* s)
++{
++    __atomic_fetch_add(&s->writers, 1, __ATOMIC_SEQ_CST);
++    if (__atomic_load_n(&s->on, __ATOMIC_SEQ_CST) == 2) return 1;
++    __atomic_fetch_sub(&s->writers, 1, __ATOMIC_SEQ_CST);
++    return 0;
++}
++
++static inline void ps3_ft_leave(ps3_ft_state* s)
++{
++    __atomic_fetch_sub(&s->writers, 1, __ATOMIC_SEQ_CST);
++}
++
++static inline void ps3_ft_span(int kind, uint32_t who, uint32_t a, uint32_t b,
++                               uint64_t t0, uint64_t t1)
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    if (__atomic_load_n(&s->on, __ATOMIC_RELAXED) != 2) return;
++    if (t1 < s->start) return;
++    if (t0 > s->end) { ps3_ft_dump(); return; }
++    if (!ps3_ft_enter(s)) return;
++    const uint32_t i = __atomic_fetch_add(&s->n, 1, __ATOMIC_RELAXED);
++    if (i >= s->cap) { __atomic_fetch_add(&s->dropped, 1, __ATOMIC_RELAXED); ps3_ft_leave(s); return; }
++    ps3_ft_rec r = { t0, t1, a, b, who, (uint32_t)kind };
++    s->buf[i] = r;
++    ps3_ft_leave(s);
++}
++
++/* sys_timer_usleep polls come tens of thousands a second; consecutive sleeps of
++ * one thread from one call site within PS3_FTRACE_MERGE_US become one span.
++ * Only the sleeping thread touches its slot. */
++static inline void ps3_ft_usleep(uint32_t tid, uint32_t lr, uint64_t t0, uint64_t t1)
++{
++    ps3_ft_state* s = &g_ps3_ft;
++    if (tid >= PS3_FT_TIDS || __atomic_load_n(&s->on, __ATOMIC_RELAXED) != 2) return;
++    if (t0 > s->end) { ps3_ft_dump(); return; }
++    if (!ps3_ft_enter(s)) return;
++    if (s->us[tid].n && s->us[tid].lr == lr && t0 - s->us[tid].t1 <= s->merge) {
++        s->us[tid].t1 = t1; s->us[tid].n++;
++        ps3_ft_leave(s);
++        return;
++    }
++    if (s->us[tid].n)
++        ps3_ft_span(PS3_FT_USLEEP, tid, s->us[tid].n, s->us[tid].lr, s->us[tid].t0, s->us[tid].t1);
++    s->us[tid].t0 = t0; s->us[tid].t1 = t1; s->us[tid].lr = lr; s->us[tid].n = 1;
++    ps3_ft_leave(s);
++}
++
++/* A PPU thread's name, for the report's labels. */
++static inline void ps3_ft_name(uint32_t tid, const char* name)
++{
++    if (tid >= PS3_FT_TIDS || !name || !PS3_FT_ON()) return;
++    if (!ps3_ft_enter(&g_ps3_ft)) return;
++    snprintf(g_ps3_ft.names[tid], sizeof g_ps3_ft.names[tid], "%s", name);
++    ps3_ft_leave(&g_ps3_ft);
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -16,6 +16,7 @@
+ #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
+ #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
+ #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
++#include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
+ 
+ /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
+  * command stream into; recorded by cellGcmSetupContext, drained by the RSX. */
+@@ -1614,11 +1615,19 @@
+         SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
+ }
+ 
++static uint64_t s_ft_sema_t0;          /* PS3_FTRACE: when the walker began waiting on the current acquire */
++
+ void cellGcm_rsx_process_fifo(void)
+ {
++    const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+     AcquireSRWLockExclusive(&s_gcm_fifo_lock);
+     gcm_rsx_process_fifo_unlocked();
+     ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
++    if (ft_t0) {
++        const uint64_t t1 = ps3_ft_now();
++        if (t1 - ft_t0 >= ps3_ft_min_ns())
++            ps3_ft_span(PS3_FT_DRAIN, 0, s_ft_sema_t0 ? 1u : 0u, 0, ft_t0, t1);
++    }
+ }
+ 
+ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1790,6 +1799,8 @@
+               if (dbg && (flips <= 8ull || (flips % 200ull) == 0))
+                   fprintf(stderr, "[flipword] %llu FIFO flip words decoded%c",
+                           flips, 10); }
++            if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
++                               ps3_ft_span(PS3_FT_FLIP_FIFO, 0, w & 7u, 0, t, t); }
+             if ((w & 0xFFFFFF00u) == GCM_FLIP_MARKER) {
+                 /* Queued by _cellGcmSetFlipCommand, which already did the
+                  * guest-visible half of the request. */
+@@ -1894,6 +1905,11 @@
+                     u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
+                     { static int sn = 0; if (getenv("GCM_RECDBG") && sn++ < 12)
+                         fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
++                    /* PS3_FTRACE: an acquire this walker sat on is satisfied now. */
++                    if (m == 0x68u && s_ft_sema_t0 && vm_read32(la) == v) {
++                        ps3_ft_span(PS3_FT_SEMA, 0, s_sema_offset, v, s_ft_sema_t0, ps3_ft_now());
++                        s_ft_sema_t0 = 0;
++                    }
+                     if (m == 0x64u)      s_sema_offset = v;
+                     else if (m == 0x6Cu) vm_write32(la, v);
+                     else if (m == 0x68u && vm_read32(la) != v) {
+@@ -1903,7 +1919,10 @@
+              * its own is the half that unblocks a waiting guest. */
+             static int blk = -1;
+             if (blk < 0) { const char* e = getenv("GCM_SEMA_ACQUIRE"); blk = e ? atoi(e) : 0; }
+-            if (blk) { sem_blocked = 1; break; }
++            if (blk) {
++                if (PS3_FT_ON() && !s_ft_sema_t0) s_ft_sema_t0 = ps3_ft_now();
++                sem_blocked = 1; break;
++            }
+         }
+                 }
+                 if (sem_blocked) break;
+@@ -2530,6 +2549,8 @@
+      * until the present thread's cellGcmTickFlip marks it done (vsync). */
+     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+     s_last_flip_time = get_timestamp_ns();
++    if (PS3_FT_ON()) { const uint64_t t = ps3_ft_now();
++                       ps3_ft_span(PS3_FT_FLIP_REQ, 0, bufferId, (uint32_t)in_fifo, t, t); }
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+      *
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -18,6 +18,7 @@
+ 
+ #include <time.h>
+ #include "rsx_d3d12_backend.h"
++#include "../../include/ps3emu/ps3_ftrace.h"
+ #include "cellGcmSys.h"
+ #include "rsx_primitives.h"
+ #include "rsx_vertex_fetch.h"
+@@ -1233,7 +1234,10 @@
+          * carry on (subsequent D3D calls fail visibly but the game keeps
+          * running headless). */
+         for (int tries = 0; tries < 3; tries++) {
+-            if (WaitForSingleObject(s_d3d.fence_event, 2000) != WAIT_TIMEOUT)
++            const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
++            const DWORD wait_result = WaitForSingleObject(s_d3d.fence_event, 2000);
++            if (ft0) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 3, wait_result, ft0, ps3_ft_now());
++            if (wait_result != WAIT_TIMEOUT)
+                 return;
+             HRESULT rr = s_d3d.device->lpVtbl->GetDeviceRemovedReason(s_d3d.device);
+             printf("[D3D12] wait_for_gpu STUCK %ds: want %llu got %llu removed=0x%08lX\n",
+@@ -5553,8 +5557,11 @@
+       } }
+ 
+     /* Present */
+-    if (s_present_this_frame)
+-        s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0); /* vsync */   /* skipped for an offscreen-only batch */
++    if (s_present_this_frame) {
++        const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
++        HRESULT result = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0);
++        if (ft0) ps3_ft_span(PS3_FT_PRESENT, 0, (uint32_t)result, 0, ft0, ps3_ft_now());
++    }
+ 
+     move_to_next_frame();
+ 
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -34,6 +34,7 @@
+ 
+ #include "ppu_tls.h"   /* PPU_THREAD_LOCAL, without a second ppu_context */
+ #include "ppu_recomp.h"
++#include "ps3emu/ps3_ftrace.h"
+ #include "ps3emu/milestone.h"   /* ps3_ms / ps3_msf -- boot milestone log */     /* ppu_context, func decls, ppu_recomp_register */
+ #include "../memory/vm.h"   /* vm_commit -- sys_mmapper_search_and_map maps for real */
+ #include "../platform/win32_compat.h"      /* Win32 types, interlocked ops, Sleep/QPC on POSIX */
+@@ -3321,10 +3322,16 @@
+      * through ps3_hle_call) and a stale CTR, so without this a wedged thread is
+      * just "somewhere in ntdll". Cleared on every exit path by the guard. */
+     struct _ScGuard {
+-        ppu_context* c;
++        ppu_context* c; uint64_t num, t0; uint32_t lr;
+         ~_ScGuard() { unsigned t = (unsigned)c->thread_id;
+-                      if (t < PS3_SC_INFLIGHT_MAX) g_sc_inflight[t] = 0; }
+-    } _sg{ ctx };
++                      if (t < PS3_SC_INFLIGHT_MAX) g_sc_inflight[t] = 0;
++                      if (PS3_FT_ON() && t0) {
++                          const uint64_t t1 = ps3_ft_now();
++                          if (num == 141) ps3_ft_usleep(t, lr, t0, t1);
++                          else if (t1 - t0 >= ps3_ft_min_ns())
++                              ps3_ft_span(PS3_FT_SYSCALL, t, (uint32_t)num, lr, t0, t1);
++                      } }
++    } _sg{ ctx, num, PS3_FT_ON() ? ps3_ft_now() : 0, (uint32_t)ctx->lr };
+     { unsigned t = (unsigned)ctx->thread_id;
+       if (t < PS3_SC_INFLIGHT_MAX) g_sc_inflight[t] = (uint32_t)num; }
+     /* Guest-PC breadcrumb for the sampling profiler: record the syscall
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -17,6 +17,7 @@
+ #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
+ #include "spu_lockstep.h"
+ #include "spu_interp.h"    /* spu_lifted_fn / spu_lifted_lookup -- defined below */
++#include "ps3emu/ps3_ftrace.h"
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -955,10 +956,31 @@
+     WakeAllConditionVariable((CONDITION_VARIABLE*)&ctx->ch_wait_cv);
+ }
+ 
++/* PS3_FTRACE: when this SPU thread last left a blocking wait. The time between
++ * two waits is a busy span, tagged with the lifted image and the SPURS workload
++ * id the kernel keeps at LS 0x1DC (SpursKernelContext.wklCurrentId) when it
++ * goes idle. Waits shorter than PS3_FTRACE_MIN_US do not split a busy span. */
++static __thread uint64_t t_ft_busy0;
++
++static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
++{
++    const uint64_t t1 = ps3_ft_now();
++    if (t1 - t0 < ps3_ft_min_ns()) return;
++    if (t_ft_busy0 && t0 > t_ft_busy0) {
++        const uint8_t* w = ctx->ls + 0x1DC;
++        ps3_ft_span(PS3_FT_SPU_BUSY, ctx->spu_id, (uint32_t)ctx->image_id,
++                    ((uint32_t)w[0] << 24) | ((uint32_t)w[1] << 16) | ((uint32_t)w[2] << 8) | w[3],
++                    t_ft_busy0, t0);
++    }
++    ps3_ft_span(PS3_FT_SPU_WAIT, ctx->spu_id, channel, ctx->pc & SPU_LS_MASK, t0, t1);
++    t_ft_busy0 = t1;
++}
++
+ /* Block the calling SPU host thread until `channel` is readable. */
+ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+ {
+     if (!yz_ch_block() || spu_ch_ready(ctx, channel)) return;
++    const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+ 
+     { static unsigned long bn = 0; unsigned long n = ++bn;
+       if (n <= 50 || (n % 512) == 0)
+@@ -988,6 +1010,7 @@
+         }
+     }
+     yz_lockstep_block_end(ctx);            /* rejoin the rotation, reacquire the token */
++    if (ft_t0) spu_ft_wait_span(ctx, channel, ft_t0);
+     ctx->status = SPU_STATUS_RUNNING;
+ }
+ 
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -20,6 +20,7 @@
+ #include <stddef.h>
+ #include "sys_ppu_thread.h"
+ #include "../platform/win32_compat.h"   /* GetCurrentThreadId on POSIX */
++#include "ps3emu/ps3_ftrace.h"           /* PS3_FTRACE: thread names for the report */
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdlib.h>   /* getenv (else return value truncated to int on x64) */
+@@ -232,6 +233,7 @@
+         t->state    = PPU_THREAD_STATE_RUNNING;
+         t->joinable = 0;                    /* nobody joins the main thread */
+         strncpy(t->name, "main", sizeof(t->name) - 1);
++        ps3_ft_name(1, "main");
+ #ifdef _WIN32
+         t->finish_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+ #else
+@@ -375,6 +377,7 @@
+         const char* name = (const char*)vm_to_host(name_addr);
+         strncpy(t->name, name, sizeof(t->name) - 1);
+         t->name[sizeof(t->name) - 1] = '\0';
++        ps3_ft_name((uint32_t)(t - g_ppu_threads) + 1u, t->name);
+     }
+ 
+     /* Create synchronization for join */
+@@ -1181,6 +1184,7 @@
+         const char* name = (const char*)vm_to_host(name_addr);
+         strncpy(t->name, name, sizeof(t->name) - 1);
+         t->name[sizeof(t->name) - 1] = '\0';
++        ps3_ft_name((uint32_t)(t - g_ppu_threads) + 1u, t->name);
+     }
+ 
+     table_unlock();
+--- /dev/null
++++ b/tools/ftrace_report.py
+@@ -0,0 +1,232 @@
++#!/usr/bin/env python3
++"""Frame-by-frame report of a PS3_FTRACE timeline.
++
++  tools/ftrace_report.py <trace.txt> [--frames N] [--ms-per-col F] [--threads a,b]
++
++PS3_FTRACE=<start s>:<seconds>:<path> (toolkit, include/ps3emu/ps3_ftrace.h)
++records spans: PPU syscalls that blocked and merged usleep poll runs (with the
++guest call site), SPU busy/wait spans (busy tagged with the lifted image and the
++SPURS workload id), the RSX walker blocked on a semaphore ACQUIRE, FIFO drains,
++flips and presents. A frame here is the time between two guest flip requests.
++
++The report says, for the median frame, how each thread spent it, and draws a
++few frames as a timeline (one column per --ms-per-col ms):
++  PPU   '#' running   '.' usleep poll   's' other blocking syscall
++  SPU   '#' busy      ' ' waiting on a channel
++  RSX   'S' blocked on ACQUIRE   'D' FIFO drain   'P' present   '|' flip reached
++        inside D/P: 'E' Metal encode   'G' waiting for the GPU   'R' render-target readback
++"""
++import argparse
++import collections
++import statistics
++import sys
++
++(SYSCALL, USLEEP, SPU_WAIT, SPU_BUSY, SEMA, SEMA_GAVEUP, DRAIN, FLIP_FIFO, FLIP_REQ, PRESENT,
++ GPU_ENCODE, GPU_WAIT, READBACK, GPU_EXEC) = range(1, 15)
++GPU_WAIT_KIND = {0: "gpu wait (flush)", 1: "gpu wait (present)", 2: "gpu wait (in-flight)"}
++
++SYSCALL_NAMES = {   # runtime/syscalls/lv2_syscall_table.h
++    43: "thread_yield", 44: "thread_join", 85: "event_flag_wait", 92: "semaphore_wait",
++    97: "lwmutex_lock", 102: "mutex_lock", 107: "cond_wait", 113: "lwcond_wait",
++    122: "rwlock_rlock", 125: "rwlock_wlock", 130: "event_queue_receive", 138: "event_port_send",
++    141: "usleep", 142: "sleep", 178: "spu_group_join", 801: "fs_open", 802: "fs_read", 818: "fs_lseek",
++}
++
++
++RSX_ROWS = ("acquire wait", "drain", "present", "encode (flush)", "encode (present)",
++            "gpu wait (flush)", "gpu wait (present)", "gpu wait (in-flight)", "readback")
++
++
++def load(path):
++    names, spans, header = {}, [], ""
++    with open(path) as f:
++        for line in f:
++            if line.startswith("#"):
++                header = line.strip()
++                continue
++            if line.startswith("T "):
++                _, tid, name = line.rstrip("\n").split(" ", 2)
++                names[int(tid)] = name
++                continue
++            k, who, a, b, t0, t1 = line.split()
++            spans.append((int(k), int(who), int(a, 16), int(b, 16), float(t0) / 1e3, float(t1) / 1e3))
++    spans.sort(key=lambda s: s[4])
++    return header, names, spans
++
++
++def overlap(s0, s1, f0, f1):
++    return max(0.0, min(s1, f1) - max(s0, f0))
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("trace")
++    ap.add_argument("--frames", type=int, default=3, help="frames drawn as a timeline")
++    ap.add_argument("--ms-per-col", type=float, default=1.0)
++    ap.add_argument("--threads", default="", help="PPU tids to draw (default: the six least blocked)")
++    args = ap.parse_args()
++
++    header, names, spans = load(args.trace)
++    print(header)
++    flips = [s[4] for s in spans if s[0] == FLIP_REQ]
++    if len(flips) < 3:
++        sys.exit("fewer than 3 flip requests in the window")
++    frames = list(zip(flips, flips[1:]))
++    durs = [b - a for a, b in frames]
++    print(f"{len(frames)} frames, median {statistics.median(durs):.1f} ms "
++          f"({1000 / statistics.median(durs):.1f} fps), min {min(durs):.1f}, max {max(durs):.1f}")
++
++    # Per-frame totals, then the median of each.
++    ppu = collections.defaultdict(lambda: collections.defaultdict(list))   # tid -> (kind, site) -> [ms per frame]
++    spu_busy = collections.defaultdict(list)                                # spu -> [ms per frame]
++    spu_wid = collections.defaultdict(float)                                # (wid) -> ms total
++    spu_img = collections.defaultdict(float)
++    rsx = collections.defaultdict(list)
++    tids = sorted({s[1] for s in spans if s[0] in (SYSCALL, USLEEP)})
++    spus = sorted({s[1] for s in spans if s[0] in (SPU_BUSY, SPU_WAIT)})
++    lo = frames[0][0]
++    j0 = 0
++    for f0, f1 in frames:
++        acc = collections.defaultdict(float)
++        while j0 < len(spans) and spans[j0][5] < lo:
++            j0 += 1
++        for s in spans[j0:]:
++            k, who, a, b, t0, t1 = s
++            if t0 > f1:
++                break
++            o = overlap(t0, t1, f0, f1)
++            if o <= 0 and k not in (FLIP_FIFO,):
++                continue
++            if k == USLEEP:
++                acc[("ppu", who, "usleep", b)] += o
++            elif k == SYSCALL:
++                acc[("ppu", who, SYSCALL_NAMES.get(a, f"sc{a}"), b)] += o
++            elif k == SPU_BUSY:
++                acc[("spu", who)] += o
++                spu_wid[b] += o
++                spu_img[a] += o
++            elif k in (SEMA, SEMA_GAVEUP):
++                acc[("rsx", "acquire wait")] += o
++            elif k == DRAIN:
++                acc[("rsx", "drain")] += o
++            elif k == PRESENT:
++                acc[("rsx", "present")] += o
++            elif k == GPU_ENCODE:
++                acc[("rsx", "encode (present)" if a else "encode (flush)")] += o
++            elif k == GPU_WAIT:
++                acc[("rsx", GPU_WAIT_KIND.get(a, "gpu wait"))] += o
++            elif k == READBACK:
++                acc[("rsx", "readback")] += o
++        for t in tids:
++            keys = [key for key in acc if key[0] == "ppu" and key[1] == t]
++            for key in keys:
++                ppu[t][(key[2], key[3])].append(acc[key])
++        for sp in spus:
++            spu_busy[sp].append(acc[("spu", sp)])
++        for what in RSX_ROWS:
++            rsx[what].append(acc[("rsx", what)])
++        lo = f0
++
++    n = len(frames)
++    med = statistics.median(durs)
++
++    def mean(xs):
++        return sum(xs) / n   # frames where it never happened count as 0
++
++    print(f"\nPer frame (mean over {n} frames, ms; frame median {med:.1f}):")
++    print("  PPU threads (time blocked, by kind and guest call site):")
++    rows = []
++    for t in tids:
++        total = sum(mean(v) for v in ppu[t].values())
++        rows.append((total, t))
++    for total, t in sorted(rows, reverse=True)[:12]:
++        nm = names.get(t, "?")
++        sites = sorted(((mean(v), k) for k, v in ppu[t].items()), reverse=True)[:4]
++        desc = ", ".join(f"{kind}@{site:08X} {ms:.1f}" for ms, (kind, site) in sites)
++        print(f"    tid {t:3d} {nm[:28]:28s} blocked {total:5.1f}  ({desc})")
++    print("  SPUs (busy):")
++    for sp in spus:
++        print(f"    spu {sp:3d} busy {mean(spu_busy[sp]):5.1f}  ({100 * mean(spu_busy[sp]) / med:.0f}%)")
++    tot = sum(spu_wid.values()) or 1
++    print("  SPU busy time by SPURS workload id (LS 0x1DC) / lifted image:")
++    print("    " + ", ".join(f"wid {w:#x} {100 * v / tot:.0f}%" for w, v in sorted(spu_wid.items(), key=lambda x: -x[1])[:8]))
++    print("    " + ", ".join(f"img {i} {100 * v / tot:.0f}%" for i, v in sorted(spu_img.items(), key=lambda x: -x[1])[:8]))
++    print("  RSX / present thread:")
++    for what in RSX_ROWS:
++        print(f"    {what:20s} {mean(rsx[what]):5.1f}")
++
++    # GPU execution per command buffer (headless commits wait for each one).
++    ex = [s for s in spans if s[0] == GPU_EXEC and flips[0] <= s[5] <= flips[-1]]
++    if ex:
++        print("  Metal command buffers (GPU's own execution time):")
++        for kind, label in ((1, "present"), (0, "flush")):
++            xs = [s for s in ex if s[3] == kind]
++            if not xs:
++                continue
++            ms = [s[5] - s[4] for s in xs]
++            print(f"    {label:8s} {len(xs) / n:4.1f}/frame  gpu {statistics.median(ms):6.2f} ms median"
++                  f"  ({sum(ms) / n:5.1f} ms/frame)  passes {statistics.median([s[1] for s in xs]):.0f}"
++                  f"  depth resolves {statistics.median([s[2] & 0xFFFF for s in xs]):.0f}"
++                  f"  colour copies {statistics.median([s[2] >> 16 for s in xs]):.0f}")
++
++    # Timelines.
++    if args.threads:
++        draw = [int(x) for x in args.threads.split(",")]
++    else:
++        draw = [t for _, t in sorted(rows)[:6]]   # the threads that work, not the idle ones
++    pick = [frames[len(frames) // 2 + i] for i in range(args.frames) if len(frames) // 2 + i < len(frames)]
++    for f0, f1 in pick:
++        cols = int((f1 - f0) / args.ms_per_col) + 1
++        print(f"\nframe at {f0 / 1000:.3f} s, {f1 - f0:.1f} ms ({args.ms_per_col:g} ms/col)")
++        lines = {}
++        for t in draw:
++            lines[("ppu", t)] = ["#"] * cols
++        for sp in spus:
++            lines[("spu", sp)] = [" "] * cols
++        lines[("rsx",)] = [" "] * cols
++
++        def paint(row, t0, t1, ch, prio=False):
++            c0 = max(0, int((t0 - f0) / args.ms_per_col))
++            c1 = min(cols - 1, int((t1 - f0) / args.ms_per_col))
++            for c in range(c0, c1 + 1):
++                if prio or row[c] in " #":
++                    row[c] = ch
++
++        for k, who, a, b, t0, t1 in spans:
++            if t1 < f0 or t0 > f1:
++                continue
++            if k == USLEEP and ("ppu", who) in lines:
++                paint(lines[("ppu", who)], t0, t1, ".", True)
++            elif k == SYSCALL and ("ppu", who) in lines:
++                paint(lines[("ppu", who)], t0, t1, "s", True)
++            elif k == SPU_BUSY and ("spu", who) in lines:
++                paint(lines[("spu", who)], t0, t1, "#")
++            elif k in (SEMA, SEMA_GAVEUP):
++                paint(lines[("rsx",)], t0, t1, "S", True)
++            elif k == DRAIN:
++                paint(lines[("rsx",)], t0, t1, "D")
++            elif k == PRESENT:
++                paint(lines[("rsx",)], t0, t1, "P", True)
++            elif k == FLIP_FIFO:
++                paint(lines[("rsx",)], t0, t0, "|", True)
++        for k, who, a, b, t0, t1 in spans:   # second pass: what the drain/present was doing
++            if t1 < f0 or t0 > f1:
++                continue
++            if k == GPU_ENCODE:
++                paint(lines[("rsx",)], t0, t1, "E", True)
++            elif k == GPU_WAIT:
++                paint(lines[("rsx",)], t0, t1, "G", True)
++            elif k == READBACK:
++                paint(lines[("rsx",)], t0, t1, "R", True)
++        for key, row in lines.items():
++            if key[0] == "ppu":
++                label = f"{key[1]:3d} {names.get(key[1], '?')[:14]:14s}"
++            elif key[0] == "spu":
++                label = f"spu {key[1]:<14d}"
++            else:
++                label = "rsx" + " " * 15
++            print(f"  {label} {''.join(row)}")
++
++
++if __name__ == "__main__":
++    main()

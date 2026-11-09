@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+project(WwsLanePumpGate LANGUAGES CXX)
+get_filename_component(PORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(SDK "${PORT_ROOT}/tools/ps3recomp")
+add_executable(wws_lane_pump_gate_probe wws_lane_pump_gate_probe.cpp)
+target_compile_features(wws_lane_pump_gate_probe PRIVATE cxx_std_20)
+target_compile_definitions(wws_lane_pump_gate_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_include_directories(wws_lane_pump_gate_probe PRIVATE
+    "${PORT_ROOT}/tests/native/synthetic_recomp" "${SDK}/include"
+    "${SDK}/runtime/ppu" "${SDK}/runtime/spu" "${SDK}/runtime/platform"
+    "${SDK}/runtime/memory" "${SDK}/libs/video")
+if(MSVC)
+    target_compile_options(wws_lane_pump_gate_probe PRIVATE /Gy /Gw /O1)
+    target_link_options(wws_lane_pump_gate_probe PRIVATE /OPT:REF)
+endif()
+target_link_libraries(wws_lane_pump_gate_probe PRIVATE winmm)
+enable_testing()
+add_test(NAME wws_lane_pump_default COMMAND wws_lane_pump_gate_probe)
+add_test(NAME wws_lane_pump_disabled COMMAND wws_lane_pump_gate_probe disabled)
+set_tests_properties(wws_lane_pump_default wws_lane_pump_disabled PROPERTIES TIMEOUT 5)

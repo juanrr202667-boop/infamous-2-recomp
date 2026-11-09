@@ -1,0 +1,193 @@
+--- a/libs/video/rsx_d3d12_linear_targets.h
++++ b/libs/video/rsx_d3d12_linear_targets.h
+@@ -2,6 +2,7 @@
+ #define RSX_D3D12_LINEAR_TARGETS_H
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ #include <string.h>
+ #include "rsx_linear_catalog.h"
+ 
+@@ -13,14 +14,52 @@
+ 
+ static int off_rt_seed_readable(const uint8_t* pointer, uint64_t bytes)
+ {
++    extern uint8_t* vm_base;
+     uintptr_t cursor = (uintptr_t)pointer;
+     if (!bytes || bytes > UINTPTR_MAX - cursor) return 0;
+     const uintptr_t end = cursor + (uintptr_t)bytes;
+     while (cursor < end) {
+-        MEMORY_BASIC_INFORMATION info;
+-        if (VirtualQuery((const void*)cursor, &info, sizeof(info)) != sizeof(info) ||
+-                info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
++        MEMORY_BASIC_INFORMATION info = {0};
++        SIZE_T queried = VirtualQuery((const void*)cursor, &info, sizeof(info));
++        /* The runner reserves its guest arena and commits 64 KiB on first
++         * access. Querying an untouched GPU target must follow that policy
++         * rather than reject the reservation before a read can fault it in.
++         * Commit only this arena's reserved pages. Never change protection on
++         * committed pages, including guards, or a different allocation. */
++        if (queried == sizeof(info) && info.State == MEM_RESERVE && vm_base &&
++                info.AllocationBase == vm_base && info.AllocationProtect == PAGE_READWRITE) {
++            const uintptr_t arena = (uintptr_t)vm_base;
++            const uintptr_t region = (uintptr_t)info.BaseAddress;
++            if (cursor < arena || (uint64_t)(end - arena) > 0x100000000ull ||
++                    region > cursor || !info.RegionSize || info.RegionSize > UINTPTR_MAX - region)
++                return 0;
++            const uintptr_t region_end = region + info.RegionSize;
++            uintptr_t commit_begin = cursor & ~(uintptr_t)0xFFFF;
++            if (commit_begin < region) commit_begin = region;
++            const uintptr_t block_begin = cursor & ~(uintptr_t)0xFFFF;
++            uintptr_t commit_end = block_begin > UINTPTR_MAX - 0x10000u ?
++                region_end : block_begin + 0x10000u;
++            if (commit_end > region_end) commit_end = region_end;
++            if (commit_end <= cursor || commit_begin < arena ||
++                    (uint64_t)(commit_end - arena) > 0x100000000ull)
++                return 0;
++            if (!VirtualAlloc((void*)commit_begin, commit_end - commit_begin,
++                    MEM_COMMIT, PAGE_READWRITE)) {
++                fprintf(stderr, "[OFFRT_SEED] guest commit failed at=%p size=%llu error=%lu\n",
++                    (void*)commit_begin, (unsigned long long)(commit_end - commit_begin),
++                    (unsigned long)GetLastError());
++                return 0;
++            }
++            continue;
++        }
++        if (queried != sizeof(info) || info.State != MEM_COMMIT ||
++                (info.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
++            fprintf(stderr, "[OFFRT_SEED] at=%p bytes=%llu query=%llu state=0x%lX protect=0x%lX allocation=%p error=%lu\n",
++                (void*)cursor, (unsigned long long)bytes, (unsigned long long)queried,
++                (unsigned long)info.State, (unsigned long)info.Protect,
++                info.AllocationBase, (unsigned long)GetLastError());
+             return 0;
++        }
+         switch (info.Protect & 0xFFu) {
+         case PAGE_READONLY: case PAGE_READWRITE: case PAGE_WRITECOPY:
+         case PAGE_EXECUTE_READ: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY:
+@@ -45,23 +84,36 @@
+     if (!view || !rsx_linear_view_valid(view) || view->format_id != 0x85 ||
+             view->bytes_per_pixel != 4 || view->width > 16384 || view->height > 16384 ||
+             !s_d3d.device || !s_d3d.cmd_list || !s_d3d.rt_rtv_heap ||
+-            !s_d3d.srv_heap || !s_d3d.srv_inc || s_off_rt_count > MAX_OFF_RTS)
++            !s_d3d.srv_heap || !s_d3d.srv_inc || s_off_rt_count > MAX_OFF_RTS) {
++        fprintf(stderr, "[OFFRT_FAILURE] stage=input view=%p count=%u/%u\n",
++            (const void*)view, s_off_rt_count, (u32)MAX_OFF_RTS);
+         return -1;
++    }
+ 
+     const uint64_t row_bytes = (uint64_t)view->width * 4;
+     const uint64_t span = (uint64_t)(view->height - 1) * view->pitch + row_bytes;
+-    if (view->offset >= 0x100000000ull || span > 0x100000000ull - view->offset)
++    if (view->offset >= 0x100000000ull || span > 0x100000000ull - view->offset) {
++        fprintf(stderr, "[OFFRT_FAILURE] stage=offset-bounds offset=%llu span=%llu\n",
++            (unsigned long long)view->offset, (unsigned long long)span);
+         return -1;
++    }
+ 
+     const u32 old_count = s_off_rt_count;
+     rsx_linear_version previous;
+     if (old_count < MAX_OFF_RTS)
+         memcpy(&previous, &s_off_rt_views[old_count], sizeof(previous));
+     u32 slot;
+-    if (rsx_linear_reserve_view(s_off_rt_views, MAX_OFF_RTS, &s_off_rt_count, view, &slot) != RSX_LINEAR_OK)
++    const int reserve_result = rsx_linear_reserve_view(s_off_rt_views, MAX_OFF_RTS, &s_off_rt_count, view, &slot);
++    if (reserve_result != RSX_LINEAR_OK) {
++        fprintf(stderr, "[OFFRT_FAILURE] stage=catalog result=%d count=%u/%u\n",
++            reserve_result, old_count, (u32)MAX_OFF_RTS);
+         return -1;
++    }
+     if (slot < old_count) {
+-        if (!s_d3d.off_rt[slot].res) return -1;
++        if (!s_d3d.off_rt[slot].res) {
++            fprintf(stderr, "[OFFRT_FAILURE] stage=catalog-missing-resource slot=%u\n", slot);
++            return -1;
++        }
+         s_d3d.off_rt[slot].used = 1;
+         return (int)slot;
+     }
+@@ -69,15 +121,21 @@
+     OffRT target;
+     memset(&target, 0, sizeof(target));
+     int mapped = 0;
++    const char* failure_stage = "guest-input";
++    HRESULT failure_hr = S_OK;
++    u32 failure_row = UINT32_MAX;
++    u32 ea = UINT32_MAX;
+     if (!vm_base || s_d3d.off_rt[slot].res || s_d3d.off_rt[slot].up) goto fail;
+-    const u32 ea = view->location == 1 ? cellGcmResolveLocated(1, (u32)view->offset) :
+-                                        cellGcmResolveIO((u32)view->offset);
++    failure_stage = "guest-mapping";
++    ea = view->location == 1 ? cellGcmResolveLocated(1, (u32)view->offset) :
++                              cellGcmResolveIO((u32)view->offset);
+     if ((view->location == 2 && !ea) || ea == UINT32_MAX ||
+             span > 0x100000000ull - ea ||
+             (uintptr_t)vm_base > UINTPTR_MAX - ((uint64_t)ea + span)) goto fail;
+ 
+     /* IO mappings use 1 MiB pages. Require a contiguous EA range instead of
+      * assuming the next guest page follows the first host page. */
++    failure_stage = "guest-contiguity";
+     for (uint64_t next = (view->offset & ~0xFFFFFull) + 0x100000ull;
+             next < view->offset + span; next += 0x100000ull) {
+         const u32 resolved = view->location == 1 ? cellGcmResolveLocated(1, (u32)next) :
+@@ -85,10 +143,14 @@
+         if ((view->location == 2 && !resolved) || (uint64_t)resolved != ea + next - view->offset)
+             goto fail;
+     }
+-    for (u32 y = 0; y < view->height; ++y)
++    failure_stage = "guest-seed-readability";
++    for (u32 y = 0; y < view->height; ++y) {
++        failure_row = y;
+         if (!off_rt_seed_readable(vm_base + ea + (uint64_t)y * view->pitch, row_bytes))
+             goto fail;
+-
++    }
++
++    failure_stage = "descriptor-handles";
+     D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle, srv_handle;
+     s_d3d.rt_rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.rt_rtv_heap, &rtv_handle);
+     s_d3d.srv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &srv_handle);
+@@ -113,9 +175,11 @@
+     texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+     texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+     clear.Format = texture.Format;
+-    if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &heap,
++    failure_stage = "texture-create";
++    failure_hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &heap,
+             D3D12_HEAP_FLAG_NONE, &texture, D3D12_RESOURCE_STATE_COPY_DEST, &clear,
+-            &IID_ID3D12Resource, (void**)&target.res)) || !target.res) goto fail;
++            &IID_ID3D12Resource, (void**)&target.res);
++    if (FAILED(failure_hr) || !target.res) goto fail;
+ 
+     const u32 upload_pitch = ((u32)row_bytes + 255u) & ~255u;
+     const uint64_t upload_size = (uint64_t)upload_pitch * view->height;
+@@ -126,12 +190,16 @@
+     buffer.Width = upload_size; buffer.Height = 1; buffer.DepthOrArraySize = 1;
+     buffer.MipLevels = 1; buffer.SampleDesc.Count = 1;
+     buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+-    if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &heap,
++    failure_stage = "upload-create";
++    failure_hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &heap,
+             D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+-            &IID_ID3D12Resource, (void**)&target.up)) || !target.up) goto fail;
++            &IID_ID3D12Resource, (void**)&target.up);
++    if (FAILED(failure_hr) || !target.up) goto fail;
+     void* upload = NULL;
+     const D3D12_RANGE no_read = {0, 0};
+-    if (FAILED(target.up->lpVtbl->Map(target.up, 0, &no_read, &upload))) goto fail;
++    failure_stage = "upload-map";
++    failure_hr = target.up->lpVtbl->Map(target.up, 0, &no_read, &upload);
++    if (FAILED(failure_hr)) goto fail;
+     mapped = 1;
+     if (!upload) goto fail;
+     for (u32 y = 0; y < view->height; ++y) {
+@@ -185,6 +253,10 @@
+     return (int)slot;
+ 
+ fail:
++    fprintf(stderr, "[OFFRT_FAILURE] stage=%s hr=0x%08lX offset=0x%08llX ea=0x%08X size=%ux%u pitch=%u span=%llu location=%u row=%u count=%u/%u\n",
++        failure_stage, (unsigned long)failure_hr, (unsigned long long)view->offset,
++        ea, view->width, view->height, view->pitch, (unsigned long long)span,
++        view->location, failure_row, old_count, (u32)MAX_OFF_RTS);
+     if (mapped) target.up->lpVtbl->Unmap(target.up, 0, NULL);
+     if (target.up) target.up->lpVtbl->Release(target.up);
+     if (target.res) target.res->lpVtbl->Release(target.res);

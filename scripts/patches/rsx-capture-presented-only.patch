@@ -1,0 +1,12 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -5532,7 +5532,9 @@
+         if (s_cap_armed && s_cap_done < s_cap_count) {
+             u32 target = s_cap_start + s_cap_done * s_cap_stride;
+             const char* allow_empty = getenv("RSX_CAP_ALLOW_EMPTY");
++            const char* presented_only = getenv("RSX_CAP_PRESENTED_ONLY");
+             if (s_d3d.frame_count >= target &&
++                (!presented_only || strcmp(presented_only, "1") || s_present_this_frame) &&
+                 (s_dbg_last_draws > 0 || (allow_empty && !strcmp(allow_empty, "1")))) {
+                 rsx_capture_frame(fi, s_dbg_last_draws, rearm_enabled ? s_cap_total : s_cap_done);
+                 fflush(stdout);

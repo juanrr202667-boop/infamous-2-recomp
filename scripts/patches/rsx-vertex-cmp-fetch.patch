@@ -1,0 +1,27 @@
+diff --git a/libs/video/rsx_vertex_fetch.c b/libs/video/rsx_vertex_fetch.c
+--- a/libs/video/rsx_vertex_fetch.c
++++ b/libs/video/rsx_vertex_fetch.c
+@@ -75,6 +75,23 @@
+ 
+     u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
+     switch (a->type) {
++    case 6: { /* CMP: one BE word containing signed X11/Y11/Z10. */
++        u32 packed = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
++                     ((u32)p[2] << 8) | (u32)p[3];
++        s32 x = (s32)(packed & 0x7FFu);
++        s32 y = (s32)((packed >> 11) & 0x7FFu);
++        s32 z = (s32)((packed >> 22) & 0x3FFu);
++        if (x & 0x400) x -= 0x800;
++        if (y & 0x400) y -= 0x800;
++        if (z & 0x200) z -= 0x400;
++        /* Expand to signed 16-bit lanes before normalization. Size=1 counts
++         * packed words, not output components; the fetch supplies XYZ and W=1. */
++        out[0] = (float)(x * 32) / 32767.0f;
++        out[1] = (float)(y * 32) / 32767.0f;
++        out[2] = (float)(z * 64) / 32767.0f;
++        out[3] = 1.0f;
++        break;
++    }
+     case 2: /* CELL_GCM_VERTEX_F: float32 BE */
+         for (u32 k = 0; k < n; k++) out[k] = rsx_rd_bef(p + k * 4);
+         break;
